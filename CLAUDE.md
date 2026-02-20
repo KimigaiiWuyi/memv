@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 memv is a structured, temporal memory system for AI agents. It extracts and retrieves knowledge from conversations using a predict-calibrate approach (inspired by Nemori): importance emerges from prediction error, not upfront LLM scoring.
 
+PyPI package name: `memvee`. Import name: `memv`.
+
 ## Development Setup
 
 Uses `uv` for dependency management. Requires Python 3.13.
@@ -70,13 +72,29 @@ Messages → BatchSegmenter → Episodes → EpisodeGenerator → PredictCalibra
 
 **`storage/sqlite/`** — All stores inherit `StoreBase` (async context manager + transactions). Convention: UUIDs as TEXT, datetimes as Unix timestamps (INTEGER), complex fields as JSON.
 
-**`protocols.py`** — `EmbeddingClient` (`embed`, `embed_batch`) and `LLMClient` (`generate`, `generate_structured`). Implement these for custom providers.
+**`protocols.py`** — `EmbeddingClient` (`embed`, `embed_batch`) and `LLMClient` (`generate`, `generate_structured`). Implement these for custom providers. Also defines `MessageStore`, `EpisodeStore`, `KnowledgeStore` protocols (incomplete — not all methods the SQLite implementations expose are in the protocols yet). No protocol for `VectorIndex` or `TextIndex`.
+
+**`config.py`** — `MemoryConfig` dataclass with all tuning knobs. Key defaults: `auto_process=False`, `batch_threshold=10`, `merge_similarity_threshold=0.9`, `knowledge_dedup_threshold=0.8`, `time_gap_minutes=30`, `enable_embedding_cache=True`.
 
 **`embeddings/openai.py`** — `OpenAIEmbedAdapter` (text-embedding-3-small, 1536 dims).
 
 **`llm/pydantic_ai.py`** — `PydanticAIAdapter` (multi-provider via PydanticAI).
 
 **`dashboard/`** — Textual TUI for browsing memory state. Run via `uv run python -m memv.dashboard`.
+
+### Public API
+
+```python
+async with memory:
+    await memory.add_exchange(user_id, user_msg, assistant_msg)  # store conversation pair
+    await memory.add_message(message)                            # store single Message
+    await memory.process(user_id)                                # extract knowledge (blocking)
+    result = await memory.retrieve("query", user_id=user_id)     # hybrid search
+    result.to_prompt()                                           # format for LLM context
+    await memory.clear_user(user_id)                             # delete all user data
+```
+
+`Memory` must be used as an async context manager — `open()` initializes stores/indices, `close()` cleans up.
 
 ### Critical Design Decisions
 
@@ -89,6 +107,17 @@ Messages → BatchSegmenter → Episodes → EpisodeGenerator → PredictCalibra
 ## Code Style
 
 - Line length: 135 characters
-- Ruff for imports/linting, ty for types
+- Ruff rules: I (isort), ERA (dead code), F401 (unused imports), E/W (pycodestyle), B (flake8-bugbear)
+- ty for type checking (pre-release, `src/` only)
 - All datetimes in UTC (`datetime.now(timezone.utc)`)
 - Async everywhere: stores, embedding calls, LLM calls, processing
+
+## Plan Tracking
+
+After committing code changes, update `notes/PLAN.md` checkboxes and append to `notes/PROGRESS.md`. Follow the format in the `/update-plan` command.
+
+## CI
+
+- `.github/workflows/ci.yml` — lint, typecheck, test on Python 3.13
+- `.github/workflows/docs.yml` — mkdocs build → GitHub Pages
+- `.github/workflows/publish.yml` — PyPI publish on release tags
