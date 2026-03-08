@@ -6,6 +6,7 @@ from .conftest import make_knowledge
 
 async def test_add_and_get(knowledge_store):
     k = make_knowledge(
+        user_id="user1",
         valid_at=datetime(2024, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
         invalid_at=datetime(2024, 12, 31, 0, 0, 0, tzinfo=timezone.utc),
     )
@@ -14,6 +15,7 @@ async def test_add_and_get(knowledge_store):
     got = await knowledge_store.get(k.id)
     assert got is not None
     assert got.id == k.id
+    assert got.user_id == "user1"
     assert got.statement == k.statement
     assert got.source_episode_id == k.source_episode_id
     assert got.created_at == k.created_at
@@ -173,26 +175,33 @@ async def test_clear_by_episodes_empty_list(knowledge_store):
     assert await knowledge_store.count() == 1
 
 
-async def test_isolation_via_episodes(knowledge_store):
-    """Knowledge doesn't have user_id — isolation is via episode ownership.
+async def test_user_id_none_for_backwards_compat(knowledge_store):
+    """Knowledge created without user_id should store and retrieve with None."""
+    k = make_knowledge(statement="no user")
+    await knowledge_store.add(k)
 
-    Each user's knowledge is linked to their episodes via source_episode_id.
-    Retrieval isolation is enforced by VectorIndex/TextIndex (which store user_id).
-    clear_by_episodes scopes deletion to a user's episode IDs.
-    """
+    got = await knowledge_store.get(k.id)
+    assert got.user_id is None
+
+
+async def test_isolation_via_user_id(knowledge_store):
+    """Knowledge has user_id for direct user scoping. Retrieval isolation
+    is also enforced by VectorIndex/TextIndex."""
     alice_ep = uuid4()
     bob_ep = uuid4()
-    await knowledge_store.add(make_knowledge(episode_id=alice_ep, statement="Alice's secret"))
-    await knowledge_store.add(make_knowledge(episode_id=bob_ep, statement="Bob's secret"))
+    await knowledge_store.add(make_knowledge(episode_id=alice_ep, user_id="alice", statement="Alice's secret"))
+    await knowledge_store.add(make_knowledge(episode_id=bob_ep, user_id="bob", statement="Bob's secret"))
 
-    # get_by_episode scopes to a single episode (owned by one user)
+    # get_by_episode still scopes to a single episode
     alice_k = await knowledge_store.get_by_episode(alice_ep)
     assert len(alice_k) == 1
     assert alice_k[0].statement == "Alice's secret"
+    assert alice_k[0].user_id == "alice"
 
     bob_k = await knowledge_store.get_by_episode(bob_ep)
     assert len(bob_k) == 1
     assert bob_k[0].statement == "Bob's secret"
+    assert bob_k[0].user_id == "bob"
 
     # clear_by_episodes only deletes knowledge for given episode IDs
     deleted = await knowledge_store.clear_by_episodes([alice_ep])
@@ -200,3 +209,66 @@ async def test_isolation_via_episodes(knowledge_store):
     assert await knowledge_store.count() == 1
     remaining = await knowledge_store.get_all()
     assert remaining[0].source_episode_id == bob_ep
+
+
+# ---------------------------------------------------------------------------
+# list_by_user / count_by_user
+# ---------------------------------------------------------------------------
+
+
+async def test_list_by_user(knowledge_store):
+    await knowledge_store.add(make_knowledge(user_id="alice", statement="a1"))
+    await knowledge_store.add(make_knowledge(user_id="alice", statement="a2"))
+    await knowledge_store.add(make_knowledge(user_id="bob", statement="b1"))
+
+    results = await knowledge_store.list_by_user("alice")
+    assert len(results) == 2
+    assert all(r.user_id == "alice" for r in results)
+
+
+async def test_list_by_user_excludes_expired(knowledge_store):
+    await knowledge_store.add(make_knowledge(user_id="alice", statement="current"))
+    await knowledge_store.add(
+        make_knowledge(user_id="alice", statement="expired", expired_at=datetime(2024, 7, 1, 0, 0, 0, tzinfo=timezone.utc))
+    )
+
+    results = await knowledge_store.list_by_user("alice")
+    assert len(results) == 1
+    assert results[0].statement == "current"
+
+    results_all = await knowledge_store.list_by_user("alice", include_expired=True)
+    assert len(results_all) == 2
+
+
+async def test_list_by_user_pagination(knowledge_store):
+    for i in range(5):
+        await knowledge_store.add(make_knowledge(user_id="alice", statement=f"fact {i}"))
+
+    page1 = await knowledge_store.list_by_user("alice", limit=2, offset=0)
+    page2 = await knowledge_store.list_by_user("alice", limit=2, offset=2)
+    page3 = await knowledge_store.list_by_user("alice", limit=2, offset=4)
+
+    assert len(page1) == 2
+    assert len(page2) == 2
+    assert len(page3) == 1
+
+    all_ids = {k.id for k in page1 + page2 + page3}
+    assert len(all_ids) == 5
+
+
+async def test_list_by_user_empty(knowledge_store):
+    assert await knowledge_store.list_by_user("nobody") == []
+
+
+async def test_count_by_user(knowledge_store):
+    await knowledge_store.add(make_knowledge(user_id="alice", statement="a1"))
+    await knowledge_store.add(make_knowledge(user_id="alice", statement="a2"))
+    await knowledge_store.add(
+        make_knowledge(user_id="alice", statement="expired", expired_at=datetime(2024, 7, 1, 0, 0, 0, tzinfo=timezone.utc))
+    )
+    await knowledge_store.add(make_knowledge(user_id="bob", statement="b1"))
+
+    assert await knowledge_store.count_by_user("alice") == 2
+    assert await knowledge_store.count_by_user("alice", include_expired=True) == 3
+    assert await knowledge_store.count_by_user("bob") == 1
+    assert await knowledge_store.count_by_user("nobody") == 0
