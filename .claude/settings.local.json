@@ -1,0 +1,38 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:pypi.org)",
+      "WebSearch",
+      "WebFetch(domain:skywork.ai)",
+      "WebFetch(domain:microsoft.github.io)",
+      "WebFetch(domain:newsletter.victordibia.com)",
+      "Bash(gh api:*)",
+      "Bash(git mv:*)",
+      "Bash(gh repo view:*)",
+      "WebFetch(domain:www.reddit.com)",
+      "WebFetch(domain:old.reddit.com)",
+      "WebFetch(domain:www.analyticsvidhya.com)",
+      "WebFetch(domain:subredditstats.com)",
+      "WebFetch(domain:altsoph.com)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:tereza-tizkova.medium.com)",
+      "WebFetch(domain:usefulai.com)",
+      "WebFetch(domain:www.graphlit.com)",
+      "WebFetch(domain:www.google.com)",
+      "WebFetch(domain:html.duckduckgo.com)",
+      "WebFetch(domain:www.bing.com)",
+      "Bash(curl:*)",
+      "Bash(python3:*)",
+      "WebFetch(domain:hindsight.vectorize.io)",
+      "WebFetch(domain:hippocampai.vercel.app)",
+      "Bash(gh issue list:*)",
+      "Bash(gh issue view:*)",
+      "WebFetch(domain:arxiv.org)",
+      "Bash(git status:*)",
+      "Bash(gh pr view:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)"
+    ]
+  }
+}
