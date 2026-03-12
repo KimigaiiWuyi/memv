@@ -58,6 +58,8 @@ jobs:
             REVIEW GUIDELINES:
             - Do not provide POSITIVE feedback — it adds noise to the review process
             - Focus on substantive issues only: bugs, correctness, security, performance
+            - Verify that the code actually achieves what the PR describes — trace the logic and check if it works as intended
+            - Look for edge cases, race conditions, off-by-one errors, incorrect assumptions, missing error paths
             - Skip trivial nitpicks: formatting, naming preferences, minor style choices
             - Do not comment on things that linters and type checkers already catch
             - If a design decision is valid but you'd do it differently, don't flag it
