@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING
 from memv.config import MemoryConfig
 from memv.memory._api import (
     add_exchange,
+    add_knowledge,
+    add_knowledge_batch,
     add_message,
     clear_user,
     delete_knowledge,
@@ -19,7 +21,7 @@ from memv.memory._api import (
 from memv.memory._lifecycle import LifecycleManager
 from memv.memory._pipeline import Pipeline
 from memv.memory._task_manager import TaskManager
-from memv.models import Message, ProcessTask, RetrievalResult
+from memv.models import KnowledgeInput, Message, ProcessTask, RetrievalResult
 
 if TYPE_CHECKING:
     from uuid import UUID
@@ -343,3 +345,35 @@ class Memory:
     async def delete_knowledge(self, knowledge_id: UUID | str) -> bool:
         """Delete knowledge from all stores and indices. Returns True if deleted."""
         return await delete_knowledge(self._lifecycle, knowledge_id)
+
+    async def add_knowledge(
+        self,
+        user_id: str,
+        item: KnowledgeInput,
+    ) -> SemanticKnowledge | None:
+        """Inject knowledge directly.
+
+        The statement is embedded, optionally deduplicated, and indexed immediately.
+        Injected knowledge is assigned importance_score=1.0 (maximum).
+
+        Returns the created entry, or None if deduplicated.
+        """
+        return await add_knowledge(self._lifecycle, user_id, item)
+
+    async def add_knowledge_batch(
+        self,
+        user_id: str,
+        items: list[KnowledgeInput],
+    ) -> list[SemanticKnowledge]:
+        """Batch inject multiple knowledge entries with batch embedding.
+
+        Each injected entry is assigned importance_score=1.0 (maximum).
+
+        Args:
+            user_id: User this knowledge belongs to
+            items: List of knowledge entries (statement, valid_at, invalid_at)
+
+        Returns:
+            List of created entries (excludes duplicates).
+        """
+        return await add_knowledge_batch(self._lifecycle, user_id, items)

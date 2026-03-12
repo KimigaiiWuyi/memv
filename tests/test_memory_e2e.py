@@ -3,8 +3,11 @@
 import json
 from datetime import datetime, timedelta, timezone
 
+import pytest
+from pydantic import ValidationError
+
+from memv import ExtractedKnowledge, KnowledgeInput
 from memv.memory.memory import Memory
-from memv.models import ExtractedKnowledge
 from memv.processing.extraction import ExtractionResponse
 
 from .conftest import MockEmbedder, MockLLM
@@ -146,7 +149,7 @@ async def test_user_isolation_e2e(tmp_path):
         assert "User likes cats" not in s2
 
 
-async def test_clear_user(tmp_path):
+async def test_clear_user_after_extraction(tmp_path):
     llm = MockLLM()
     embedder = MockEmbedder()
 
@@ -163,6 +166,23 @@ async def test_clear_user(tmp_path):
         assert counts["episodes"] >= 1
 
         result = await memory.retrieve("User has a fact to delete", user_id="user1")
+        assert len(result.retrieved_knowledge) == 0
+
+
+async def test_clear_user_after_injection(tmp_path):
+    """clear_user removes injected knowledge (source_episode_id=None)."""
+    llm = MockLLM()
+    embedder = MockEmbedder()
+    memory = _make_memory(tmp_path, llm, embedder)
+    async with memory:
+        await memory.add_knowledge("user1", KnowledgeInput(statement="User works at Anthropic"))
+        await memory.add_knowledge("user1", KnowledgeInput(statement="User likes coffee"))
+
+        counts = await memory.clear_user("user1")
+        assert counts["knowledge"] == 2
+
+        assert await memory.list_knowledge("user1") == []
+        result = await memory.retrieve("Anthropic", user_id="user1")
         assert len(result.retrieved_knowledge) == 0
 
 
@@ -488,6 +508,136 @@ async def test_delete_knowledge_nonexistent(tmp_path):
     memory = _make_memory(tmp_path, llm, embedder)
     async with memory:
         assert await memory.delete_knowledge(uuid4()) is False
+
+
+async def test_add_knowledge(tmp_path):
+    """Inject a single statement and retrieve it."""
+    llm = MockLLM()
+    embedder = MockEmbedder()
+    memory = _make_memory(tmp_path, llm, embedder)
+    async with memory:
+        k = await memory.add_knowledge("user1", KnowledgeInput(statement="User works at Anthropic"))
+        assert k is not None
+        assert k.statement == "User works at Anthropic"
+        assert k.source_episode_id is None
+
+        result = await memory.retrieve("Anthropic", user_id="user1")
+        assert any(r.statement == "User works at Anthropic" for r in result.retrieved_knowledge)
+
+
+async def test_add_knowledge_temporal(tmp_path):
+    """Injected knowledge respects valid_at/invalid_at in temporal retrieval."""
+    llm = MockLLM()
+    embedder = MockEmbedder()
+    memory = _make_memory(tmp_path, llm, embedder)
+    async with memory:
+        await memory.add_knowledge(
+            "user1",
+            KnowledgeInput(
+                statement="User visited Tokyo",
+                valid_at=datetime(2024, 3, 1, tzinfo=timezone.utc),
+                invalid_at=datetime(2024, 3, 31, tzinfo=timezone.utc),
+            ),
+        )
+
+        result = await memory.retrieve("Tokyo", user_id="user1", at_time=datetime(2024, 3, 15, tzinfo=timezone.utc))
+        assert len(result.retrieved_knowledge) == 1
+
+        result = await memory.retrieve("Tokyo", user_id="user1", at_time=datetime(2024, 5, 1, tzinfo=timezone.utc))
+        assert len(result.retrieved_knowledge) == 0
+
+
+async def test_add_knowledge_batch(tmp_path):
+    """Batch inject multiple entries."""
+    llm = MockLLM()
+    embedder = MockEmbedder()
+    memory = _make_memory(tmp_path, llm, embedder, enable_knowledge_dedup=False)
+    async with memory:
+        items = [KnowledgeInput(statement="Fact A"), KnowledgeInput(statement="Fact B"), KnowledgeInput(statement="Fact C")]
+        created = await memory.add_knowledge_batch("user1", items)
+        assert len(created) == 3
+
+        entries = await memory.list_knowledge("user1")
+        assert {k.statement for k in entries} == {"Fact A", "Fact B", "Fact C"}
+
+
+async def test_add_knowledge_dedup(tmp_path):
+    """Duplicate injection returns None when dedup is enabled."""
+    llm = MockLLM()
+    embedder = MockEmbedder()
+    memory = _make_memory(tmp_path, llm, embedder, enable_knowledge_dedup=True, knowledge_dedup_threshold=0.8)
+    async with memory:
+        k1 = await memory.add_knowledge("user1", KnowledgeInput(statement="User likes Python"))
+        k2 = await memory.add_knowledge("user1", KnowledgeInput(statement="User likes Python"))
+        assert k1 is not None
+        assert k2 is None
+
+        assert len(await memory.list_knowledge("user1")) == 1
+
+
+async def test_add_knowledge_batch_dedup(tmp_path):
+    """Batch dedup skips intra-batch and cross-existing duplicates."""
+    llm = MockLLM()
+    embedder = MockEmbedder()
+    memory = _make_memory(tmp_path, llm, embedder, enable_knowledge_dedup=True, knowledge_dedup_threshold=0.8)
+    async with memory:
+        # Pre-existing entry
+        await memory.add_knowledge("user1", KnowledgeInput(statement="User likes Python"))
+
+        # Batch: one duplicate of existing, one duplicate within batch, one new
+        items = [
+            KnowledgeInput(statement="User likes Python"),
+            KnowledgeInput(statement="User likes cats"),
+            KnowledgeInput(statement="User likes cats"),
+        ]
+        created = await memory.add_knowledge_batch("user1", items)
+
+        assert len(created) == 1
+        assert created[0].statement == "User likes cats"
+        assert len(await memory.list_knowledge("user1")) == 2
+
+
+async def test_add_knowledge_empty_statement(tmp_path):
+    """Empty or whitespace-only statements are rejected."""
+    llm = MockLLM()
+    embedder = MockEmbedder()
+    memory = _make_memory(tmp_path, llm, embedder)
+    async with memory:
+        with pytest.raises(ValidationError, match="non-empty"):
+            await memory.add_knowledge("user1", KnowledgeInput(statement=""))
+        with pytest.raises(ValidationError, match="non-empty"):
+            await memory.add_knowledge("user1", KnowledgeInput(statement="   "))
+        with pytest.raises(ValidationError, match="non-empty"):
+            await memory.add_knowledge_batch("user1", [KnowledgeInput(statement="")])
+
+
+async def test_add_knowledge_invalid_temporal_range(tmp_path):
+    """invalid_at before valid_at is rejected."""
+    llm = MockLLM()
+    embedder = MockEmbedder()
+    memory = _make_memory(tmp_path, llm, embedder)
+    async with memory:
+        with pytest.raises(ValidationError, match="invalid_at must be after"):
+            await memory.add_knowledge("user1", KnowledgeInput(statement="Fact", valid_at=_ts(60), invalid_at=_ts(0)))
+        with pytest.raises(ValidationError, match="invalid_at must be after"):
+            await memory.add_knowledge_batch("user1", [KnowledgeInput(statement="Fact", valid_at=_ts(60), invalid_at=_ts(0))])
+
+
+async def test_add_knowledge_user_isolation(tmp_path):
+    """Injected knowledge is isolated per user."""
+    llm = MockLLM()
+    embedder = MockEmbedder()
+    memory = _make_memory(tmp_path, llm, embedder)
+    async with memory:
+        await memory.add_knowledge("user1", KnowledgeInput(statement="User likes cats"))
+        await memory.add_knowledge("user2", KnowledgeInput(statement="User likes dogs"))
+
+        r1 = await memory.retrieve("cats", user_id="user1")
+        r2 = await memory.retrieve("dogs", user_id="user2")
+        assert any(k.statement == "User likes cats" for k in r1.retrieved_knowledge)
+        assert not any(k.statement == "User likes dogs" for k in r1.retrieved_knowledge)
+        assert any(k.statement == "User likes dogs" for k in r2.retrieved_knowledge)
+        assert not any(k.statement == "User likes cats" for k in r2.retrieved_knowledge)
 
 
 # ---------------------------------------------------------------------------

@@ -6,7 +6,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Literal
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, Field, PrivateAttr
+from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 
 if TYPE_CHECKING:
     from asyncio import Task
@@ -73,8 +73,10 @@ class BiTemporalValidity(BaseModel):
 class SemanticKnowledge(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     user_id: str | None = Field(default=None, description="The ID of the user this knowledge belongs to.")
-    statement: str = Field(..., description="A declarative statement about the user or world generated from the conversation")
-    source_episode_id: UUID = Field(..., description="The id of the episode that generated this knowledge")
+    statement: str = Field(..., description="A declarative statement about the user or world")
+    source_episode_id: UUID | None = Field(
+        default=None, description="The id of the episode that generated this knowledge (None = directly injected)"
+    )
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc), description="The time when the knowledge entry was created (UTC)."
     )
@@ -102,6 +104,27 @@ class SemanticKnowledge(BaseModel):
     def is_current(self) -> bool:
         """Check if this is the current (non-expired) record."""
         return self.expired_at is None
+
+
+class KnowledgeInput(BaseModel):
+    """Input for direct knowledge injection."""
+
+    statement: str = Field(..., description="A declarative statement about the user or world")
+    valid_at: datetime | None = Field(default=None, description="When fact became true in world (None = unknown/always)")
+    invalid_at: datetime | None = Field(default=None, description="When fact stopped being true (None = still true)")
+
+    @field_validator("statement", mode="after")
+    @classmethod
+    def statement_must_be_non_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("statement must be a non-empty string")
+        return v
+
+    @model_validator(mode="after")
+    def check_temporal_range(self) -> KnowledgeInput:
+        if self.valid_at is not None and self.invalid_at is not None and self.invalid_at <= self.valid_at:
+            raise ValueError("invalid_at must be after valid_at")
+        return self
 
 
 class RetrievalResult(BaseModel):

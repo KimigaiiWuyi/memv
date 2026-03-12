@@ -12,7 +12,7 @@ from memv.storage.sqlite._base import StoreBase
 
 
 class KnowledgeStore(StoreBase):
-    """Store for semantic knowledge extracted from episodes."""
+    """Store for semantic knowledge."""
 
     async def add(self, knowledge: SemanticKnowledge) -> None:
         await self._conn.execute(
@@ -24,7 +24,7 @@ class KnowledgeStore(StoreBase):
                 str(knowledge.id),
                 knowledge.user_id,
                 knowledge.statement,
-                str(knowledge.source_episode_id),
+                str(knowledge.source_episode_id) if knowledge.source_episode_id else None,
                 int(knowledge.created_at.timestamp()),
                 knowledge.importance_score,
                 json.dumps(knowledge.embedding),
@@ -162,7 +162,10 @@ class KnowledgeStore(StoreBase):
         return cursor.rowcount > 0
 
     async def clear_by_episodes(self, episode_ids: Sequence[UUID | str]) -> int:
-        """Delete all knowledge entries for given episodes. Returns count of deleted entries."""
+        """Delete all knowledge entries for given episodes. Returns count of deleted entries.
+
+        Note: Does not affect injected knowledge (source_episode_id=NULL). Use clear_user() for complete deletion.
+        """
         if not episode_ids:
             return 0
         placeholders = ",".join("?" * len(episode_ids))
@@ -173,12 +176,18 @@ class KnowledgeStore(StoreBase):
         await self._commit()
         return cursor.rowcount
 
+    async def clear_user(self, user_id: str) -> int:
+        """Delete all knowledge entries for a user. Returns count deleted."""
+        cursor = await self._conn.execute("DELETE FROM semantic_knowledge WHERE user_id = ?", (user_id,))
+        await self._commit()
+        return cursor.rowcount
+
     def _row_to_knowledge(self, row: aiosqlite.Row) -> SemanticKnowledge:
         return SemanticKnowledge(
             id=UUID(row["id"]),
             user_id=row["user_id"],
             statement=row["statement"],
-            source_episode_id=UUID(row["source_episode_id"]),
+            source_episode_id=UUID(row["source_episode_id"]) if row["source_episode_id"] else None,
             created_at=datetime.fromtimestamp(row["created_at"], tz=timezone.utc),
             importance_score=row["importance_score"],
             embedding=json.loads(row["embedding"]) if row["embedding"] else None,
