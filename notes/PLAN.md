@@ -1,5 +1,5 @@
 # Next Steps Plan
-Last updated: 2026-03-11
+Last updated: 2026-03-13
 
 **Mission:** Make memv the best "remember what users said" library. Solid semantic memory first, then procedural/agent memory as the differentiator.
 
@@ -225,9 +225,56 @@ Run the harness, get numbers. Can't market predict-calibrate without data.
 
 ## v0.2.0 — "Production-ready"
 
-**Goal:** memv can be used in production. Pluggable backends, a Postgres option, cleaner DX. After this release, semantic memory is solid enough to pivot focus to agent/procedural memory.
+**Goal:** memv can be used in production. Pluggable backends, a Postgres option, knowledge relationships, user profiles, cleaner DX. After this release, semantic memory is solid enough to pivot focus to agent/procedural memory.
 
-### 7. Protocol Cleanup
+### 7. Knowledge Relationships: `extends` + Cascade Invalidation
+
+**Source:** Supermemory analysis (`notes/internal/SUPERMEMORY_ANALYSIS.md`). Validated by `examples/test_supersession.py` — direct contradictions (employer, location) are caught by existing `supersedes` mechanism, but transitive contradictions are missed. "User works on Search team at Google" stays current after user moves to Anthropic because the LLM classifies "researcher at Anthropic" as `new` (not contradiction), and the embedding similarity between "Search team at Google" and "researcher at Anthropic" is below the 0.7 vector fallback threshold.
+
+**Solution:** `extends` relationships enable cascade invalidation. When "works at Google" is superseded, its children ("Search team at Google", "uses Python at Google") are invalidated too.
+
+**Model** (`src/memv/models.py`):
+- [ ] Add `extends: int | None = None` to `ExtractedKnowledge` (index into existing knowledge, like `supersedes`)
+- [ ] Add `parent_id: UUID | None = None` to `SemanticKnowledge` (the entry this extends)
+
+**Schema** (`src/memv/storage/sqlite/_knowledge.py`):
+- [ ] Migration: `ALTER TABLE semantic_knowledge ADD COLUMN parent_id TEXT`
+- [ ] `get_children(knowledge_id) → list[SemanticKnowledge]` — find entries that extend a given entry
+- [ ] `cascade_invalidate(knowledge_id)` — invalidate entry + all descendants recursively
+
+**Prompts** (`src/memv/processing/prompts.py`):
+- [ ] Add `extends` to extraction output format: "If this fact enriches/details an entry from `<existing_knowledge>` without replacing it, set extends to its index number. Otherwise null."
+- [ ] Add examples: `[0] User works at Google` → new fact "User works on Search team at Google" → `extends: 0`
+
+**Pipeline** (`src/memv/memory/_pipeline.py`):
+- [ ] When `item.extends is not None` and index valid → set `parent_id` on new `SemanticKnowledge`
+- [ ] In `_handle_supersedes`: after invalidating an entry, call `cascade_invalidate` to expire children
+
+**Not doing (yet):** `derives` relationship (inferred knowledge). Adds complexity without a validated use case. Revisit if retrieval quality data shows gaps in inferred facts.
+
+### 8. User Profiles
+
+**Source:** Supermemory analysis. Every competitor with a managed API has this. Solves the "you don't know what to search for" cold-start problem — agents get foundational user context without needing a query.
+
+**API** (`src/memv/memory/_api.py`, `memory.py`):
+- [ ] `profile(user_id) → UserProfile` — returns static + dynamic facts in a single call
+- [ ] `UserProfile.to_prompt() → str` — formatted for system prompt injection
+
+**Model** (`src/memv/models.py`):
+- [ ] `UserProfile(static: list[str], dynamic: list[str])`
+
+**Implementation**:
+- [ ] Static = knowledge entries older than N days (configurable, default 14) that haven't been superseded
+- [ ] Dynamic = knowledge entries from last N days, or entries that were recently updated
+- [ ] Compute from existing `SemanticKnowledge` — no new storage, just a query + classification
+- [ ] Optional `q: str` param — when provided, also runs `retrieve()` and returns results alongside profile
+
+**Config** (`src/memv/config.py`):
+- [ ] `profile_static_age_days: int = 14` — entries older than this are static
+- [ ] `profile_max_static: int = 20` — cap on static facts returned
+- [ ] `profile_max_dynamic: int = 10` — cap on dynamic facts returned
+
+### 9. Protocol Cleanup
 
 Current protocols are incomplete — they define read interfaces but omit mutation methods the codebase actually calls. `VectorIndex` and `TextIndex` have no protocol at all. `LifecycleManager` imports concrete SQLite classes directly. This blocks any alternative backend.
 
@@ -238,7 +285,7 @@ Current protocols are incomplete — they define read interfaces but omit mutati
 - [ ] Backend factory in `LifecycleManager` — config-driven creation instead of hardcoded SQLite imports
 - [ ] Fix Retriever imports — import from `memv.protocols` instead of `memv.storage`
 
-### 8. PostgreSQL Backend
+### 10. PostgreSQL Backend
 
 Production-grade alternative. SQLite is fine for dev/single-process, but anything multi-process or deployed needs Postgres.
 
@@ -256,7 +303,7 @@ Production-grade alternative. SQLite is fine for dev/single-process, but anythin
 - [ ] Parametrized tests: `@pytest.mark.parametrize("backend", ["sqlite", "postgres"])`
 - [ ] CI service container for Postgres
 
-### 9. DX Improvements
+### 11. DX Improvements
 
 Friction points identified from API analysis.
 
@@ -270,11 +317,17 @@ Friction points identified from API analysis.
 - [ ] Make `embedding_client` optional at construction — only required when calling `process()` or `retrieve()`, not for storage-only use
 - [ ] `get_episode(episode_id)` — navigate from knowledge back to source conversation context
 
+**Idempotent writes (source: Supermemory):**
+- [ ] `custom_id: str | None` on `add_exchange()`, `add_message()`, `add_knowledge()` — upsert semantics: same ID = update, new ID = create
+- [ ] Prevents duplicates when integrations retry or replay
+
 **Config:**
 - [ ] Simplify constructor — `MemoryConfig` only, remove 16 duplicate kwargs from `Memory.__init__`
 
 ### v0.2.0 Verification
 
+- `extends` cascade invalidation: re-run `examples/test_supersession.py` — "Search team at Google" must be expired after employer change
+- User profiles: `profile(user_id)` returns static/dynamic split; static facts are stable, dynamic facts are recent
 - Parametrized test suite passes on both SQLite and Postgres
 - All protocols have complete method coverage matching actual usage
 - A new backend can be implemented purely from protocols (no need to read SQLite source)
@@ -314,11 +367,15 @@ Not committed to. Revisit based on usage data, benchmark results, and user feedb
 | Hooks/Events | — | `EventBus` for composability. Useful for framework integration. |
 | Memory scoping | — | Namespaces for different memory spaces. No concrete request yet. |
 | MCP server | — | Separate package if demand materializes. |
+| Search results with graph context | Supermemory | Return `context.parents[]` + `context.children[]` with relationship types in retrieval results. Depends on §7 (extends). Retrieval-time join. |
+| Memory Router (proxy pattern) | Supermemory | Reverse proxy between app and LLM provider, auto-injects memories. Great adoption UX but wrong layer for a library. Revisit as separate package. |
+| `derives` relationship | Supermemory | Inferred knowledge from combining facts, marked `isInference=true`. No validated use case yet. |
+| `forgetAfter` / scheduled expiration | Supermemory | Auto-expire memories after a date. We have `invalid_at` (event time) but no automatic pruning at retrieval. |
 
 ### Not doing
 | Item | Why |
 |------|-----|
-| Knowledge Graph | High effort, low urgency. Flat semantic knowledge works. |
+| Full Knowledge Graph | `extends` + cascade invalidation adopted (§7). Full graph (Neo4j, entity-relation triples, graph traversal queries) is still overkill. `derives` relationship deferred — no validated use case yet. |
 | Neo4j backend | Niche. Postgres covers production needs. |
 | Background consolidation | Premature without knowledge growth data. |
 | `reflect()`-style generation | Wrong layer — memory retrieves, agent generates. |
