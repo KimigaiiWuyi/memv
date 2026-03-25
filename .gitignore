@@ -235,3 +235,7 @@ pyrightconfig.json
 # Local roadmap files
 ROADMAP.md
 agentmemory-roadmap.md
+
+# GSD planning docs
+.planning/
+agentmemory-presentation.html
