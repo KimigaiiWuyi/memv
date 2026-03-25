@@ -233,3 +233,18 @@ Major plan restructure — cut scope from 35 sections across 5 releases down to 
 - Changed: `clear_user` in `_api.py` and `dashboard/app.py` simplified — `KnowledgeStore.clear_user(user_id)` added, no longer fetches episodes first
 - Added: `VectorIndex.has_near_duplicate()` helper — dedup logic shared between Pipeline and injection API
 - Updated: test count 215 → 248 (5 e2e injection tests, 4 vector index tests)
+
+## 2026-03-25
+
+- Closed: PR #19 (score threshold filtering) — approach was wrong. RRF scores are rank-based, not relevance-based. Normalizing them to [0,1] produces unintuitive thresholds (single-source results cap at 0.5 regardless of actual relevance). Competitor analysis: Supermemory/Graphiti threshold on cosine similarity, Letta uses RRF but doesn't threshold on it.
+- Skipped: §5 (Score Threshold Filtering) entirely — `top_k` is sufficient for per-user knowledge bases. If revisited later, correct approach is cosine similarity pre-filter (not normalized RRF post-filter).
+- Added: open questions to §7 (Knowledge Relationships) — cascade invalidation may be too aggressive (not all children are context-dependent on parent), no undo mechanism for cascade
+- Redesigned: §8 (User Profiles) — age-based static/dynamic classification replaced with open question. Age doesn't correlate with stability ("User's name is X" is static from day 1). Need to decide classification approach before implementing. Removed `profile_static_age_days` config.
+- Removed: "Expose RRF scores on RetrievalResult" from §11 (DX) — RRF scores aren't meaningful to callers
+- Updated: §11 token-budgeted retrieval wording — "by descending RRF rank" not "by descending score" (rank order matters, score magnitude doesn't)
+- Updated: §9 VectorIndex protocol — removed `search_with_scores` (unnecessary now that §5 is skipped)
+- Reverted: 4 local GSD planning commits (`.planning/` directory) — added to `.git/info/exclude`
+- Committed: `b6fe578` — drop duplicate embedding TEXT column from semantic_knowledge (#21). ~50% DB size reduction.
+- Restructured: v0.1.1 is now complete — benchmarks (§6) deferred to v0.2.0+, all other items done.
+- Restructured: v0.2.0 narrowed to Protocol cleanup (§7, was §9) + PostgreSQL backend (§8, was §10) only. Knowledge relationships, user profiles, DX improvements, and benchmarks moved to Ideas Parking Lot. Driver: CEO pressure to ship marketable release + friend needs Postgres for real-world testing.
+- Decision: ship v0.1.1 now, then focus v0.2.0 entirely on Postgres to unblock first external user.

@@ -1,9 +1,9 @@
 # Next Steps Plan
-Last updated: 2026-03-13
+Last updated: 2026-03-25
 
 **Mission:** Make memv the best "remember what users said" library. Solid semantic memory first, then procedural/agent memory as the differentiator.
 
-**Current state:** v0.1.0 shipped (alpha, Feb 2026). Core pipeline works end-to-end. 215 tests for ~4.8K LOC. Predict-calibrate extraction, write-time temporal normalization, bi-temporal validity, episode segmentation — no single competitor has all four. LongMemEval benchmark harness built, full run pending. user_id denormalization and knowledge CRUD complete (PR #16). Contradiction handling with index-based supersedes implemented.
+**Current state:** v0.1.1 ready to ship. Core pipeline works end-to-end. 229 tests for ~4.8K LOC. Predict-calibrate extraction, write-time temporal normalization, bi-temporal validity, episode segmentation — no single competitor has all four. user_id denormalization, knowledge CRUD (PR #16), contradiction handling, direct injection (PR #18), duplicate embedding column removal (#21) all complete. LongMemEval harness built, full run deferred.
 
 **What's unique about memv:**
 - Predict-calibrate extraction (only Nemori shares this — importance from prediction error)
@@ -13,7 +13,7 @@ Last updated: 2026-03-13
 
 **What's table-stakes that memv is still missing:**
 - ~~Knowledge CRUD through public API~~ (done — PR #16)
-- Score/relevance threshold on retrieval
+- ~~Score/relevance threshold on retrieval~~ (skipped — `top_k` sufficient, see §5)
 - ~~Direct knowledge injection (bootstrapping without fake conversations)~~ (done — PR #18)
 - A second storage backend (Mem0 has 6+, most have 2+)
 
@@ -119,7 +119,9 @@ LongMemEval harness built. Full run pending.
 
 **Goal:** A developer can pip install memv, feed conversations, inspect what was learned, fix mistakes, seed known facts, and trust that retrieval doesn't return garbage. Table-stakes for any memory library.
 
-**Internal order:** user_id denorm → CRUD → Contradiction → Injection → Score threshold → Benchmarks
+**Internal order:** user_id denorm → CRUD → Contradiction → Injection → ~~Score threshold~~ → ~~Benchmarks~~
+
+**Status:** All items complete. Ready to tag and publish.
 
 ### 1. Add user_id to SemanticKnowledge
 
@@ -192,100 +194,41 @@ Bootstrapping requmires fake conversations without this. Every competitor with a
 - [x] Make `source_episode_id` nullable (None = injected)
 - [x] Return the created entry
 
-### 5. Score Threshold Filtering
+### 5. Score Threshold Filtering — SKIPPED
 
-`retrieve()` always returns `top_k` results regardless of relevance. Low-quality results waste context tokens.
+PR #19 closed. `top_k` is sufficient for now — with per-user knowledge bases (typically 50-200 facts), retrieval quality isn't a problem. If users report "retrieval returns irrelevant junk," revisit with cosine similarity pre-filter approach (filter vector search candidates before RRF fusion, not normalized RRF scores post-fusion). See PROGRESS.md 2026-03-25 for full rationale.
 
-**Retrieval** (`src/memv/retrieval/retriever.py`):
-- [ ] Add `min_score: float | None = None` to `retrieve()`
-- [ ] Post-RRF: filter results below threshold
-- [ ] `allow_empty: bool = False` — always return at least 1 result unless explicitly allowed
+### 6. Benchmark Runs — DEFERRED to v0.2.0+
 
-**Config** (`src/memv/config.py`):
-- [ ] `default_min_score: float | None = None` — global default, overridable per-call
-
-**API**: Pass `min_score` through `Memory.retrieve()` → `Retriever.retrieve()`
-
-### 6. Benchmark Runs
-
-Run the harness, get numbers. Can't market predict-calibrate without data.
-
-- [ ] First full run (500 questions) — overall + per-type accuracy
-- [ ] Ablation: with/without predict-calibrate, with/without episode segmentation
-- [ ] Compare against Nemori/Zep published baselines
-- [ ] Published LongMemEval numbers for memv
+Moved out of v0.1.1. Harness is built and smoke-tested (3 questions, 66.7% on fast config). Full run deferred — not blocking adoption. Run when marketing needs numbers.
 
 ### v0.1.1 Verification
 
-- All 206 existing tests pass
-- New tests for: CRUD (list, get, invalidate, delete), contradiction (supersedes flow, audit trail), injection (single, batch, dedup check), score threshold (filtering, allow_empty)
+- All 229 tests pass
+- New tests for: CRUD (list, get, invalidate, delete), contradiction (supersedes flow, audit trail), injection (single, batch, dedup check)
+- Duplicate embedding column removed (#21) — ~50% DB size reduction
 - `make all` passes
 
 ---
 
 ## v0.2.0 — "Production-ready"
 
-**Goal:** memv can be used in production. Pluggable backends, a Postgres option, knowledge relationships, user profiles, cleaner DX. After this release, semantic memory is solid enough to pivot focus to agent/procedural memory.
+**Goal:** memv can be deployed in production with Postgres. Pluggable backends via protocols, PostgreSQL as first alternative. This unblocks real-world testing and makes the library marketable.
 
-### 7. Knowledge Relationships: `extends` + Cascade Invalidation
+**Internal order:** Protocol cleanup → PostgreSQL backend
 
-**Source:** Supermemory analysis (`notes/internal/SUPERMEMORY_ANALYSIS.md`). Validated by `examples/test_supersession.py` — direct contradictions (employer, location) are caught by existing `supersedes` mechanism, but transitive contradictions are missed. "User works on Search team at Google" stays current after user moves to Anthropic because the LLM classifies "researcher at Anthropic" as `new` (not contradiction), and the embedding similarity between "Search team at Google" and "researcher at Anthropic" is below the 0.7 vector fallback threshold.
-
-**Solution:** `extends` relationships enable cascade invalidation. When "works at Google" is superseded, its children ("Search team at Google", "uses Python at Google") are invalidated too.
-
-**Model** (`src/memv/models.py`):
-- [ ] Add `extends: int | None = None` to `ExtractedKnowledge` (index into existing knowledge, like `supersedes`)
-- [ ] Add `parent_id: UUID | None = None` to `SemanticKnowledge` (the entry this extends)
-
-**Schema** (`src/memv/storage/sqlite/_knowledge.py`):
-- [ ] Migration: `ALTER TABLE semantic_knowledge ADD COLUMN parent_id TEXT`
-- [ ] `get_children(knowledge_id) → list[SemanticKnowledge]` — find entries that extend a given entry
-- [ ] `cascade_invalidate(knowledge_id)` — invalidate entry + all descendants recursively
-
-**Prompts** (`src/memv/processing/prompts.py`):
-- [ ] Add `extends` to extraction output format: "If this fact enriches/details an entry from `<existing_knowledge>` without replacing it, set extends to its index number. Otherwise null."
-- [ ] Add examples: `[0] User works at Google` → new fact "User works on Search team at Google" → `extends: 0`
-
-**Pipeline** (`src/memv/memory/_pipeline.py`):
-- [ ] When `item.extends is not None` and index valid → set `parent_id` on new `SemanticKnowledge`
-- [ ] In `_handle_supersedes`: after invalidating an entry, call `cascade_invalidate` to expire children
-
-**Not doing (yet):** `derives` relationship (inferred knowledge). Adds complexity without a validated use case. Revisit if retrieval quality data shows gaps in inferred facts.
-
-### 8. User Profiles
-
-**Source:** Supermemory analysis. Every competitor with a managed API has this. Solves the "you don't know what to search for" cold-start problem — agents get foundational user context without needing a query.
-
-**API** (`src/memv/memory/_api.py`, `memory.py`):
-- [ ] `profile(user_id) → UserProfile` — returns static + dynamic facts in a single call
-- [ ] `UserProfile.to_prompt() → str` — formatted for system prompt injection
-
-**Model** (`src/memv/models.py`):
-- [ ] `UserProfile(static: list[str], dynamic: list[str])`
-
-**Implementation**:
-- [ ] Static = knowledge entries older than N days (configurable, default 14) that haven't been superseded
-- [ ] Dynamic = knowledge entries from last N days, or entries that were recently updated
-- [ ] Compute from existing `SemanticKnowledge` — no new storage, just a query + classification
-- [ ] Optional `q: str` param — when provided, also runs `retrieve()` and returns results alongside profile
-
-**Config** (`src/memv/config.py`):
-- [ ] `profile_static_age_days: int = 14` — entries older than this are static
-- [ ] `profile_max_static: int = 20` — cap on static facts returned
-- [ ] `profile_max_dynamic: int = 10` — cap on dynamic facts returned
-
-### 9. Protocol Cleanup
+### 7. Protocol Cleanup
 
 Current protocols are incomplete — they define read interfaces but omit mutation methods the codebase actually calls. `VectorIndex` and `TextIndex` have no protocol at all. `LifecycleManager` imports concrete SQLite classes directly. This blocks any alternative backend.
 
 - [ ] Complete store protocols — add all methods actually used (KnowledgeStore: `get_all`, `get_current`, `get_valid_at`, `invalidate`, `delete`, `clear_by_episodes`, `count`, `list_by_user`, `count_by_user`; MessageStore: `list_users`, `count`, `delete`, `clear_user`; EpisodeStore: `count`, `delete`, `clear_user`, `update`)
-- [ ] Add `VectorIndex` protocol (`open`, `close`, `add`, `search`, `search_with_scores`, `delete`, `clear_user`)
+- [ ] Add `VectorIndex` protocol (`open`, `close`, `add`, `search`, `delete`, `clear_user`)
 - [ ] Add `TextIndex` protocol (`open`, `close`, `add`, `search`, `delete`, `clear_user`)
 - [ ] Add `open`/`close` to all store protocols
 - [ ] Backend factory in `LifecycleManager` — config-driven creation instead of hardcoded SQLite imports
 - [ ] Fix Retriever imports — import from `memv.protocols` instead of `memv.storage`
 
-### 10. PostgreSQL Backend
+### 8. PostgreSQL Backend
 
 Production-grade alternative. SQLite is fine for dev/single-process, but anything multi-process or deployed needs Postgres.
 
@@ -303,31 +246,8 @@ Production-grade alternative. SQLite is fine for dev/single-process, but anythin
 - [ ] Parametrized tests: `@pytest.mark.parametrize("backend", ["sqlite", "postgres"])`
 - [ ] CI service container for Postgres
 
-### 11. DX Improvements
-
-Friction points identified from API analysis.
-
-**Retrieval output:**
-- [ ] Expose RRF scores on `RetrievalResult` — `list[tuple[SemanticKnowledge, float]]` or scores dict
-- [ ] Improve `to_prompt()` — temporal annotations ("learned 3 weeks ago"), source info, configurable format
-- [ ] Token-budgeted retrieval — `max_tokens` as alternative to `top_k`, accumulate by descending score until budget exhausted
-
-**API surface:**
-- [ ] `count_knowledge(user_id)` / `count_messages(user_id)` / `count_episodes(user_id)` — stats through public API
-- [ ] Make `embedding_client` optional at construction — only required when calling `process()` or `retrieve()`, not for storage-only use
-- [ ] `get_episode(episode_id)` — navigate from knowledge back to source conversation context
-
-**Idempotent writes (source: Supermemory):**
-- [ ] `custom_id: str | None` on `add_exchange()`, `add_message()`, `add_knowledge()` — upsert semantics: same ID = update, new ID = create
-- [ ] Prevents duplicates when integrations retry or replay
-
-**Config:**
-- [ ] Simplify constructor — `MemoryConfig` only, remove 16 duplicate kwargs from `Memory.__init__`
-
 ### v0.2.0 Verification
 
-- `extends` cascade invalidation: re-run `examples/test_supersession.py` — "Search team at Google" must be expired after employer change
-- User profiles: `profile(user_id)` returns static/dynamic split; static facts are stable, dynamic facts are recent
 - Parametrized test suite passes on both SQLite and Postgres
 - All protocols have complete method coverage matching actual usage
 - A new backend can be implemented purely from protocols (no need to read SQLite source)
@@ -356,6 +276,15 @@ Not committed to. Revisit based on usage data, benchmark results, and user feedb
 
 | Idea | Source | Notes |
 |------|--------|-------|
+| Knowledge relationships (`extends` + cascade) | Supermemory | Deferred from v0.2.0 — open design questions on cascade aggression and undo. See PROGRESS.md 2026-03-25. |
+| User profiles (static/dynamic split) | Supermemory | Deferred from v0.2.0 — open question on how to classify static vs dynamic (age-based is wrong). |
+| DX: improved `to_prompt()` | — | Temporal annotations, source info, configurable format. |
+| DX: token-budgeted retrieval | — | `max_tokens` as alternative to `top_k`, accumulate by descending RRF rank. |
+| DX: stats API | — | `count_knowledge/messages/episodes(user_id)` through public API. |
+| DX: idempotent writes | Supermemory | `custom_id` on add methods for upsert semantics. Prevents duplicates on retry/replay. |
+| DX: simplify constructor | — | `MemoryConfig` only, remove 16 duplicate kwargs from `Memory.__init__`. |
+| Benchmark runs (LongMemEval) | — | Harness built, smoke-tested. Full run (500 questions) + ablation deferred. Run when marketing needs numbers. |
+| Score threshold filtering | PR #19 | If revisited, use cosine similarity pre-filter, not normalized RRF. See PROGRESS.md 2026-03-25. |
 | Knowledge categorization | Multiple competitors | Deferred — unclear value without a concrete consumer. Revisit if smart formatting or filtered retrieval becomes needed. |
 | Retrieval trigger field (`when_to_use`) | ReMe | Interesting but adds LLM output field + extra embedding per fact. Revisit after benchmarks show retrieval is the bottleneck. |
 | Retrieval reinforcement | OpenMemory | Boost frequently-retrieved facts. Adds complexity to scoring. Need data showing it helps. |
