@@ -1,6 +1,5 @@
 """Semantic knowledge storage."""
 
-import json
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from uuid import UUID
@@ -18,8 +17,8 @@ class KnowledgeStore(StoreBase):
         await self._conn.execute(
             """INSERT INTO semantic_knowledge
             (id, user_id, statement, source_episode_id, created_at,
-             importance_score, embedding, valid_at, invalid_at, expired_at, superseded_by)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+             importance_score, valid_at, invalid_at, expired_at, superseded_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 str(knowledge.id),
                 knowledge.user_id,
@@ -27,7 +26,6 @@ class KnowledgeStore(StoreBase):
                 str(knowledge.source_episode_id) if knowledge.source_episode_id else None,
                 int(knowledge.created_at.timestamp()),
                 knowledge.importance_score,
-                json.dumps(knowledge.embedding),
                 int(knowledge.valid_at.timestamp()) if knowledge.valid_at else None,
                 int(knowledge.invalid_at.timestamp()) if knowledge.invalid_at else None,
                 int(knowledge.expired_at.timestamp()) if knowledge.expired_at else None,
@@ -190,7 +188,7 @@ class KnowledgeStore(StoreBase):
             source_episode_id=UUID(row["source_episode_id"]) if row["source_episode_id"] else None,
             created_at=datetime.fromtimestamp(row["created_at"], tz=timezone.utc),
             importance_score=row["importance_score"],
-            embedding=json.loads(row["embedding"]) if row["embedding"] else None,
+            embedding=None,
             valid_at=datetime.fromtimestamp(row["valid_at"], tz=timezone.utc) if row["valid_at"] else None,
             invalid_at=datetime.fromtimestamp(row["invalid_at"], tz=timezone.utc) if row["invalid_at"] else None,
             expired_at=datetime.fromtimestamp(row["expired_at"], tz=timezone.utc) if row["expired_at"] else None,
@@ -206,7 +204,6 @@ class KnowledgeStore(StoreBase):
                 source_episode_id TEXT,
                 created_at INTEGER,
                 importance_score REAL,
-                embedding TEXT,
                 valid_at INTEGER,
                 invalid_at INTEGER,
                 expired_at INTEGER,
@@ -217,6 +214,7 @@ class KnowledgeStore(StoreBase):
         await self._migrate_add_bitemporal_columns()
         await self._migrate_add_user_id_column()
         await self._migrate_add_superseded_by_column()
+        await self._migrate_drop_embedding_column()
         await self._conn.execute("CREATE INDEX IF NOT EXISTS idx_sk_valid_at ON semantic_knowledge(valid_at)")
         await self._conn.execute("CREATE INDEX IF NOT EXISTS idx_sk_expired_at ON semantic_knowledge(expired_at)")
         await self._conn.execute("CREATE INDEX IF NOT EXISTS idx_sk_user_id ON semantic_knowledge(user_id)")
@@ -255,3 +253,11 @@ class KnowledgeStore(StoreBase):
 
         if "superseded_by" not in columns:
             await self._conn.execute("ALTER TABLE semantic_knowledge ADD COLUMN superseded_by TEXT")
+
+    async def _migrate_drop_embedding_column(self):
+        """Drop the embedding TEXT column if it exists. Embeddings are stored in vec_knowledge."""
+        cursor = await self._conn.execute("PRAGMA table_info(semantic_knowledge)")
+        columns = {row["name"] for row in await cursor.fetchall()}
+
+        if "embedding" in columns:
+            await self._conn.execute("ALTER TABLE semantic_knowledge DROP COLUMN embedding")

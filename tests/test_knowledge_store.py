@@ -30,7 +30,7 @@ async def test_add_with_embedding(knowledge_store):
     await knowledge_store.add(k)
 
     got = await knowledge_store.get(k.id)
-    assert got.embedding == emb
+    assert got.embedding is None
 
 
 async def test_get_nonexistent(knowledge_store):
