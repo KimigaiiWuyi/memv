@@ -1,4 +1,5 @@
 import hashlib
+import os
 import struct
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -6,52 +7,166 @@ from uuid import uuid4
 import pytest
 
 from memv.models import Episode, Message, MessageRole, SemanticKnowledge
-from memv.storage.sqlite._episodes import EpisodeStore
-from memv.storage.sqlite._knowledge import KnowledgeStore
-from memv.storage.sqlite._messages import MessageStore
-from memv.storage.sqlite._text_index import TextIndex
-from memv.storage.sqlite._vector_index import VectorIndex
+from memv.storage.sqlite._episodes import EpisodeStore as SqliteEpisodeStore
+from memv.storage.sqlite._knowledge import KnowledgeStore as SqliteKnowledgeStore
+from memv.storage.sqlite._messages import MessageStore as SqliteMessageStore
+from memv.storage.sqlite._text_index import TextIndex as SqliteTextIndex
+from memv.storage.sqlite._vector_index import VectorIndex as SqliteVectorIndex
+
+# ---------------------------------------------------------------------------
+# Backend parametrization
+# ---------------------------------------------------------------------------
+
+
+def pytest_addoption(parser):
+    parser.addoption("--backend", action="append", default=[], help="Storage backends to test (sqlite, postgres)")
+
+
+def pytest_generate_tests(metafunc):
+    if "backend" in metafunc.fixturenames:
+        backends = metafunc.config.getoption("backend") or ["sqlite"]
+        metafunc.parametrize("backend", backends, indirect=True)
 
 
 @pytest.fixture
-async def message_store(tmp_path):
-    store = MessageStore(str(tmp_path / "test.db"))
-    async with store:
+def backend(request):
+    return request.param
+
+
+# ---------------------------------------------------------------------------
+# Postgres pool management
+# ---------------------------------------------------------------------------
+
+_pg_extension_created = False
+
+
+async def _create_pg_pool():
+    global _pg_extension_created
+    url = os.environ.get("MEMV_TEST_POSTGRES_URL")
+    if not url:
+        pytest.skip("MEMV_TEST_POSTGRES_URL not set")
+    import asyncpg
+    from pgvector.asyncpg import register_vector
+
+    if not _pg_extension_created:
+        conn = await asyncpg.connect(url)
+        try:
+            await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+        finally:
+            await conn.close()
+        _pg_extension_created = True
+
+    async def _init(conn):
+        await register_vector(conn)
+
+    return await asyncpg.create_pool(url, init=_init, min_size=1, max_size=5)
+
+
+async def _cleanup_pg(pool):
+    tables = ["messages", "episodes", "semantic_knowledge", "vec_knowledge", "fts_knowledge"]
+    async with pool.acquire() as conn:
+        for table in tables:
+            try:
+                await conn.execute(f"DELETE FROM {table}")  # noqa: S608
+            except Exception:
+                pass
+    await pool.close()
+
+
+# ---------------------------------------------------------------------------
+# Store fixtures (parametrized by backend)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+async def message_store(backend, tmp_path):
+    if backend == "postgres":
+        from memv.storage.postgres import MessageStore as PgMessageStore
+
+        pool = await _create_pg_pool()
+        store = PgMessageStore(pool)
+        await store.open()
         yield store
+        await _cleanup_pg(pool)
+    else:
+        store = SqliteMessageStore(str(tmp_path / "test.db"))
+        async with store:
+            yield store
 
 
 @pytest.fixture
-async def episode_store(tmp_path):
-    store = EpisodeStore(str(tmp_path / "test.db"))
-    async with store:
+async def episode_store(backend, tmp_path):
+    if backend == "postgres":
+        from memv.storage.postgres import EpisodeStore as PgEpisodeStore
+
+        pool = await _create_pg_pool()
+        store = PgEpisodeStore(pool)
+        await store.open()
         yield store
+        await _cleanup_pg(pool)
+    else:
+        store = SqliteEpisodeStore(str(tmp_path / "test.db"))
+        async with store:
+            yield store
 
 
 @pytest.fixture
-async def knowledge_store(tmp_path):
-    store = KnowledgeStore(str(tmp_path / "test.db"))
-    async with store:
+async def knowledge_store(backend, tmp_path):
+    if backend == "postgres":
+        from memv.storage.postgres import KnowledgeStore as PgKnowledgeStore
+
+        pool = await _create_pg_pool()
+        store = PgKnowledgeStore(pool)
+        await store.open()
         yield store
+        await _cleanup_pg(pool)
+    else:
+        store = SqliteKnowledgeStore(str(tmp_path / "test.db"))
+        async with store:
+            yield store
 
 
 @pytest.fixture
-async def text_index(tmp_path):
-    idx = TextIndex(str(tmp_path / "test.db"))
-    async with idx:
-        yield idx
+async def text_index(backend, tmp_path):
+    if backend == "postgres":
+        from memv.storage.postgres import TextIndex as PgTextIndex
 
-
-@pytest.fixture
-async def vector_index(tmp_path):
-    idx = VectorIndex(str(tmp_path / "test.db"), dimensions=4)
-    try:
+        pool = await _create_pg_pool()
+        idx = PgTextIndex(pool)
         await idx.open()
-    except ImportError as e:
-        pytest.skip(f"sqlite-vec extension not available: {e}")
-    try:
         yield idx
-    finally:
-        await idx.close()
+        await _cleanup_pg(pool)
+    else:
+        idx = SqliteTextIndex(str(tmp_path / "test.db"))
+        async with idx:
+            yield idx
+
+
+@pytest.fixture
+async def vector_index(backend, tmp_path):
+    if backend == "postgres":
+        from memv.storage.postgres import VectorIndex as PgVectorIndex
+
+        pool = await _create_pg_pool()
+        idx = PgVectorIndex(pool, dimensions=4)
+        await idx.open()
+        yield idx
+        await _cleanup_pg(pool)
+    else:
+        idx = SqliteVectorIndex(str(tmp_path / "test.db"), dimensions=4)
+        try:
+            await idx.open()
+        except ImportError as e:
+            pytest.skip(f"sqlite-vec extension not available: {e}")
+        try:
+            yield idx
+        finally:
+            await idx.close()
+
+
+# ---------------------------------------------------------------------------
+# Factory helpers
+# ---------------------------------------------------------------------------
 
 
 def make_message(user_id="user1", role=MessageRole.USER, content="hello", sent_at=None):
@@ -77,7 +192,7 @@ def make_episode(user_id="user1", title="Test Episode", content="A test episode.
 
 def make_knowledge(
     episode_id=None,
-    user_id=None,
+    user_id="user1",
     statement="User likes Python",
     embedding=None,
     valid_at=None,
@@ -185,13 +300,13 @@ def mock_embedder():
 
 @pytest.fixture
 async def pipeline_stores(tmp_path):
-    """All 5 stores on a single temp DB for pipeline/e2e tests."""
+    """All 5 stores on a single temp DB for pipeline/e2e tests (sqlite only)."""
     db_path = str(tmp_path / "pipeline.db")
-    messages = MessageStore(db_path)
-    episodes = EpisodeStore(db_path)
-    knowledge = KnowledgeStore(db_path)
-    text_idx = TextIndex(db_path)
-    vec_idx = VectorIndex(db_path, dimensions=1536)
+    messages = SqliteMessageStore(db_path)
+    episodes = SqliteEpisodeStore(db_path)
+    knowledge = SqliteKnowledgeStore(db_path)
+    text_idx = SqliteTextIndex(db_path)
+    vec_idx = SqliteVectorIndex(db_path, dimensions=1536)
 
     await messages.open()
     await episodes.open()

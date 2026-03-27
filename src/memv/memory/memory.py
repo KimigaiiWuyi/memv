@@ -35,7 +35,7 @@ class Memory:
 
     Example:
         ```python
-        memory = Memory(db_path="memory.db", embedding_client=embedder, llm_client=llm)
+        memory = Memory(db_url="memory.db", embedding_client=embedder, llm_client=llm)
         await memory.open()
 
         await memory.add_message(Message(...))
@@ -70,7 +70,7 @@ class Memory:
 
     def __init__(
         self,
-        db_path: str | None = None,
+        db_url: str | None = None,
         embedding_client: EmbeddingClient | None = None,
         llm_client: LLMClient | None = None,
         embedding_dimensions: int | None = None,
@@ -97,7 +97,7 @@ class Memory:
         embedding_cache_ttl_seconds: int | None = None,
     ):
         self._lifecycle = LifecycleManager(
-            db_path=db_path,
+            db_url=db_url,
             embedding_client=embedding_client,
             llm_client=llm_client,
             embedding_dimensions=embedding_dimensions,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import warnings
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from memv.cache import EmbeddingCache
 from memv.config import MemoryConfig
@@ -15,12 +15,21 @@ if TYPE_CHECKING:
     from memv.protocols import EmbeddingClient, EpisodeStore, KnowledgeStore, LLMClient, MessageStore, TextIndex, VectorIndex
 
 
+def _resolve_backend(backend: str, db_url: str) -> str:
+    """Resolve backend from config. 'auto' detects from db_url prefix."""
+    if backend != "auto":
+        return backend
+    if db_url.startswith(("postgresql://", "postgres://")):
+        return "postgres"
+    return "sqlite"
+
+
 class LifecycleManager:
     """Manages Memory initialization, database connections, and component lifecycle."""
 
     def __init__(
         self,
-        db_path: str | None = None,
+        db_url: str | None = None,
         embedding_client: EmbeddingClient | None = None,
         llm_client: LLMClient | None = None,
         embedding_dimensions: int | None = None,
@@ -46,23 +55,16 @@ class LifecycleManager:
         embedding_cache_size: int | None = None,
         embedding_cache_ttl_seconds: int | None = None,
     ):
-        # Use config or defaults
         cfg = config or MemoryConfig()
 
-        # Determine database path from argument or config
-        if db_path is None and embedding_client is None:
-            self.db_path = cfg.db_path
-        elif db_path is not None:
-            self.db_path = db_path
-        else:
-            self.db_path = cfg.db_path
+        self.db_url = db_url or cfg.db_url
+        self._backend = _resolve_backend(cfg.backend, self.db_url)
 
         if embedding_client is None:
             raise ValueError("embedding_client is required")
         self.embedder = embedding_client
         self.llm = llm_client
 
-        # Use param if provided, else use config value
         self.dimensions = embedding_dimensions if embedding_dimensions is not None else cfg.embedding_dimensions
 
         # Auto-processing config
@@ -99,13 +101,17 @@ class LifecycleManager:
             embedding_cache_ttl_seconds if embedding_cache_ttl_seconds is not None else cfg.embedding_cache_ttl_seconds
         )
 
-        # Create stores via backend factory
         self.messages: MessageStore
         self.episodes: EpisodeStore
         self.knowledge: KnowledgeStore
         self.vector_index: VectorIndex
         self.text_index: TextIndex
-        self._create_stores(cfg.backend)
+        self._pg_pool: Any = None
+
+        if self._backend == "sqlite":
+            self._create_sqlite_stores()
+        elif self._backend != "postgres":
+            raise ValueError(f"Unknown backend: {self._backend!r}. Supported: 'sqlite', 'postgres'.")
 
         # Processing components (initialized in open())
         self.retriever: Retriever | None = None
@@ -115,38 +121,59 @@ class LifecycleManager:
         self.episode_merger: EpisodeMerger | None = None
         self.extractor: PredictCalibrateExtractor | None = None
 
-        # State
         self.is_open = False
 
-    def _create_stores(self, backend: str) -> None:
-        """Instantiate stores and indices for the given backend."""
-        if backend == "sqlite":
-            # Ensure parent directory exists
-            db_dir = Path(self.db_path).parent
-            if db_dir != Path("."):
-                db_dir.mkdir(parents=True, exist_ok=True)
+    def _create_sqlite_stores(self) -> None:
+        db_dir = Path(self.db_url).parent
+        if db_dir != Path("."):
+            db_dir.mkdir(parents=True, exist_ok=True)
 
-            from memv.storage.sqlite import EpisodeStore, KnowledgeStore, MessageStore, TextIndex, VectorIndex
+        from memv.storage.sqlite import EpisodeStore, KnowledgeStore, MessageStore, TextIndex, VectorIndex
 
-            self.messages = MessageStore(self.db_path)
-            self.episodes = EpisodeStore(self.db_path)
-            self.knowledge = KnowledgeStore(self.db_path)
-            self.vector_index = VectorIndex(self.db_path, dimensions=self.dimensions, name="knowledge")
-            self.text_index = TextIndex(self.db_path, name="knowledge")
-        else:
-            raise ValueError(f"Unknown backend: {backend!r}. Supported: 'sqlite'.")
+        self.messages = MessageStore(self.db_url)
+        self.episodes = EpisodeStore(self.db_url)
+        self.knowledge = KnowledgeStore(self.db_url)
+        self.vector_index = VectorIndex(self.db_url, dimensions=self.dimensions, name="knowledge")
+        self.text_index = TextIndex(self.db_url, name="knowledge")
+
+    async def _create_postgres_stores(self) -> None:
+        import asyncpg
+        from pgvector.asyncpg import register_vector
+
+        # Extension must exist before pool init can register the vector type
+        conn = await asyncpg.connect(self.db_url)
+        try:
+            await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+        finally:
+            await conn.close()
+
+        async def _init_conn(conn: asyncpg.Connection) -> None:
+            await register_vector(conn)
+
+        self._pg_pool = await asyncpg.create_pool(self.db_url, init=_init_conn)
+
+        from memv.storage.postgres import EpisodeStore, KnowledgeStore, MessageStore, TextIndex, VectorIndex
+
+        self.messages = MessageStore(self._pg_pool)
+        self.episodes = EpisodeStore(self._pg_pool)
+        self.knowledge = KnowledgeStore(self._pg_pool)
+        self.vector_index = VectorIndex(self._pg_pool, dimensions=self.dimensions)
+        self.text_index = TextIndex(self._pg_pool)
 
     async def open(self) -> None:
         """Open all database connections and initialize components."""
         if self.is_open:
             return
 
+        if self._backend == "postgres":
+            await self._create_postgres_stores()
+
         await self.messages.open()
         await self.episodes.open()
         await self.knowledge.open()
         await self.vector_index.open()
         await self.text_index.open()
-        # Create embedding cache if enabled
+
         embedding_cache = None
         if self.enable_embedding_cache:
             embedding_cache = EmbeddingCache(
@@ -189,15 +216,19 @@ class LifecycleManager:
 
     async def close(self) -> None:
         """Close all database connections."""
-        if not self.is_open:
-            return
+        if self.is_open:
+            await self.messages.close()
+            await self.episodes.close()
+            await self.knowledge.close()
+            await self.vector_index.close()
+            await self.text_index.close()
+            self.is_open = False
 
-        await self.messages.close()
-        await self.episodes.close()
-        await self.knowledge.close()
-        await self.vector_index.close()
-        await self.text_index.close()
-        self.is_open = False
+        # Pool cleanup runs regardless of is_open — if open() failed after
+        # pool creation, we still need to close the pool.
+        if self._pg_pool is not None:
+            await self._pg_pool.close()
+            self._pg_pool = None
 
     def ensure_open(self) -> None:
         """Raise if not open."""
