@@ -17,7 +17,7 @@
 
 ---
 
-**memv** extracts knowledge from conversations using a predict-calibrate approach: importance emerges from prediction error, not upfront LLM scoring.
+**memv** (*/mɛm-viː/*) extracts knowledge from conversations using a predict-calibrate approach: importance emerges from prediction error, not upfront LLM scoring.
 
 ## Why memv?
 
