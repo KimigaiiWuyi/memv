@@ -2,10 +2,10 @@
   <img src="docs/assets/banner.png" alt="memv" width="600">
 </p>
 
-<h1 align="center">memv <sub><i>/mɛm-viː/</i></sub></h1>
+<h1 align="center">memv</h1>
 
 <p align="center">
-  <b>Structured, Temporal Memory for AI Agents</b>
+  <i>/mɛm-viː/</i> · Structured, temporal memory for AI agents
 </p>
 
 <p align="center">
