@@ -119,15 +119,12 @@ async def main():
                 continue
 
             if user_input.lower() == "debug":
-                # Show what's in memory
-                result = await memory.retrieve("*", user_id=agent.user_id, top_k=10)
-                buffered = memory._buffers.get(agent.user_id, 0)
-                console.print(
-                    Panel(
-                        (result.to_prompt() or "[dim]No memories yet[/dim]") + f"\n\n[dim]Buffered messages: {buffered}[/dim]",
-                        title="Memory Contents",
-                    )
-                )
+                knowledge = await memory.list_knowledge(agent.user_id, limit=10)
+                if knowledge:
+                    content = "\n".join(f"- {k.statement}" for k in knowledge)
+                else:
+                    content = "[dim]No memories yet[/dim]"
+                console.print(Panel(content, title="Memory Contents"))
                 continue
 
             response = await agent.chat(user_input)
