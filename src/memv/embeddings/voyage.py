@@ -19,8 +19,8 @@ class VoyageEmbedAdapter:
 
     async def embed(self, text: str) -> list[float]:
         result = await self.client.embed([text], model=self.model, input_type="query")
-        return result.embeddings[0]  # type: ignore[index]
+        return result.embeddings[0]  # type: ignore
 
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
         result = await self.client.embed(texts, model=self.model, input_type="document")
-        return result.embeddings  # type: ignore[return-value]
+        return result.embeddings  # type: ignore
