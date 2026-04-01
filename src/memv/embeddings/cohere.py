@@ -19,8 +19,8 @@ class CohereEmbedAdapter:
 
     async def embed(self, text: str) -> list[float]:
         response = await self.client.embed(texts=[text], model=self.model, input_type="search_query", embedding_types=["float"])
-        return response.embeddings.float_[0]  # type: ignore[index]
+        return response.embeddings.float_[0]  # type: ignore
 
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
         response = await self.client.embed(texts=texts, model=self.model, input_type="search_document", embedding_types=["float"])
-        return response.embeddings.float_  # type: ignore[return-value]
+        return response.embeddings.float_  # type: ignore
