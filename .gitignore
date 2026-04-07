@@ -239,3 +239,10 @@ agentmemory-roadmap.md
 # GSD planning docs
 .planning/
 agentmemory-presentation.html
+
+# Hookify rules (personal)
+.claude/*.local.md
+
+# Benchmark data and results
+benchmarks/data/*.json
+benchmarks/results/*/

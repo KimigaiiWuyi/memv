@@ -104,14 +104,31 @@ Prompt-level rules, confidence filter, temporal parsing module. Code-level regex
 
 ## Completed: Benchmark Harness
 
-LongMemEval harness built. Full run pending.
+LongMemEval harness aligned with official evaluation protocol (xiaowu0162/longmemeval). Balanced 30-question run (5/type) complete.
 
 <details>
 <summary>Completed checkboxes (click to expand)</summary>
 
 - [x] Dataset loader, ingestion, search, evaluation, config presets, runner, pipeline parallelization, `make benchmark`
+- [x] Official eval protocol: gpt-4o judge, temperature=0, max_tokens=10, type-specific prompts, abstention prompt for `_abs` questions, task-averaged accuracy
+- [x] Segmentation passthrough fix: `batch_threshold` wired up (was dead code). 68% fewer episodes, 54% fewer facts, 66% faster.
+- [x] Balanced 30-question baseline (5/type, `balanced-5` run)
 
 </details>
+
+### Baseline Results (balanced-5, gpt-4o-mini, 2026-04-07)
+
+| Type | Score | Analysis |
+|------|-------|----------|
+| knowledge-update | 3/5 = 60% | Supersedes partially working. Off-by-one bug (#32) causes fallback to vector search. One question returned old value instead of updated one. |
+| single-session-user | 3/5 = 60% | Extraction loses context when compressing (#33). "Where did I redeem coupon?" → fact had location missing. |
+| temporal-reasoning | 2/5 = 40% | Date extraction errors. MoMA→Met got "30 days" instead of 7. One answer was "zero days." |
+| multi-session | 2/5 = 40% | Retrieval recall — found 1 of 3 needle sessions. top_k=10 may not surface all fragments. |
+| single-session-assistant | 1/5 = 20% | Extraction prompt focuses on user facts, assistant-generated content not extracted. Architectural mismatch — see note below. |
+| single-session-preference | 0/5 = 0% | Extraction doesn't capture preferences. Top priority fix. |
+| **Task-averaged** | **36.7%** | |
+
+**Note on single-session-assistant:** This type tests "remember what the assistant said" (shift schedules, restaurant recommendations, book descriptions). Extracting assistant content would bloat the KB with generic responses in production. This is a benchmark/architecture mismatch, not a bug. We accept lower scores here and report task-averaged-excluding-assistant as a secondary metric.
 
 ---
 
@@ -268,9 +285,22 @@ Only OpenAI today. Users want provider choice and a no-API-key local option. The
 - More vector DB backends (Qdrant, Pinecone, Milvus, Chroma) — they only replace VectorIndex, not TextIndex. memv's hybrid retrieval (vector + BM25 via RRF) is a strength. Splitting storage across two systems adds operational complexity without clear demand. Revisit if users request it.
 - More LLM adapters — PydanticAI already supports OpenAI, Anthropic, Google, Groq, Ollama, and others. No work needed.
 
+### 10. Extraction Quality Fixes
+
+Prompt-level fixes in `prompts.py`, prioritized by benchmark impact.
+
+**Benchmark-driven (highest impact on task-averaged):**
+- [ ] **Preference extraction** — extraction prompt captures facts ("User graduated with BA") but not preferences that emerge from dialogue ("User prefers Adobe Premiere Pro"). LongMemEval single-session-preference: 0/5. Fix: add preference/opinion extraction rules to prompt — "When user expresses preferences through choices, corrections, or repeated patterns, extract as 'User prefers X over Y' or 'User wants X.'" (#1 priority)
+- [ ] **Self-contained facts** (#33) — extracted facts lose context from surrounding conversation. "User redeemed coupon" drops "at Target" because it seemed obvious in context. Fix: instruct extractor to make every fact answerable without original context — "each fact must include who, what, where, when if mentioned anywhere in the conversation."
+- [ ] **Supersedes off-by-one** (#32) — LLM returns 1-based index for 0-based list. Fix: clarify prompt + handle off-by-one in code.
+
+**Found in manual testing:**
+- [ ] **Assistant self-description leak** — extractor stores assistant statements about itself as facts (e.g. "Assistant does not have memories like a human does"). EXCLUSIONS cover assistant *suggestions* but not self-descriptions. Fix: add explicit exclusion for statements about the assistant's own nature, capabilities, or limitations.
+- [ ] **"User named X" phrasing** — third-person rewrite produces awkward headlines ("User named Bartosz won the Anthropic Hackathon"). The extraction prompt uses "User" as subject, but combining it with the user's actual name reads unnaturally. Fix: refine the coreference/naming rules in the extraction prompt.
+
 ---
 
-## After v0.2.0: Agent/Procedural Memory
+## After v0.1.2: Agent/Procedural Memory
 
 Semantic memory is solid. The unsolved problem — and memv's long-term differentiator — is **procedural memory for agents**. Agents don't just have conversations; they have runs with actions, tool calls, decisions, and outcomes. Learning *how to do things better* from past runs is what no one has solved well.
 
@@ -282,6 +312,109 @@ This is big enough to be its own planning effort. Key questions to answer before
 4. **What does the API look like?** `start_run()` → `add_action()` → `end_run()` → `process_runs()` → `retrieve_for_tool()` is the sketch, but needs validation against real agent architectures.
 
 Defer detailed planning until v0.2.0 ships and there's real usage data for semantic memory.
+
+---
+
+## Purpose-Built Memory Construction Engine
+
+**Status:** Exploration (2026-04-02)
+**Trigger:** Chroma Context-1 report, Gemma 4 release, Mem-α paper (ICLR 2026)
+**Full design notes:** `notes/internal/RL_EXTRACTION_MODEL.md`
+
+### Thesis
+
+RL-train a small open model (Gemma 4 E4B, 4.5B params) as a **full memory construction engine** — the entire policy of what to store, update, and delete. Not just extraction, but the complete memory management pipeline in one model call.
+
+Validated by Mem-α (ICLR 2026): RL training on Qwen3-4B produces a memory agent that surpasses GPT-4.1-mini (0.642 vs 0.517 avg accuracy). The approach works.
+
+### Architecture: dual processing paths
+
+```
+Generic LLM path (current):
+  Messages → [Segmenter] → [EpisodeGen] → [PredictCalibrate] → Knowledge
+               LLM call      LLM call        2 LLM calls
+
+Trained engine path (new):
+  Messages + KB → [MemoryEngine] → operations → Knowledge
+                    one call           ↓
+                              episode record (provenance only)
+```
+
+Same storage. Same retrieval. Same API. Two paths through the pipeline.
+
+Episodes under the engine path are lightweight provenance records (message group + timestamps + links to produced knowledge), not narrative intermediates.
+
+### Predict-calibrate — implicit via reward
+
+The engine receives `existing_knowledge` as input. Predict-calibrate behavior emerges from training:
+- Insert something already in KB → redundancy penalty
+- Miss something novel → low QA accuracy
+- Correctly skip known info → compression reward
+
+Same principle as the explicit two-step pipeline, learned rather than architected. Optional chain-of-thought in output gives the model a scratchpad for explicit comparison reasoning.
+
+### Action space: expandable by knowledge type
+
+```json
+{"operations": [
+  {"op": "insert", "type": "semantic", "statement": "...", "confidence": 0.9},
+  {"op": "update", "type": "semantic", "supersedes": 3, "statement": "..."},
+  {"op": "delete", "type": "semantic", "target": 7}
+]}
+```
+
+Grows as memv adds types: `semantic` (today) → `episodic` → `procedural` → `core` (user summary, à la Mem-α). Each new type is an incremental training run — the model already understands novelty detection, compression, and contradiction handling.
+
+### Why this is the moat
+
+Every competitor prompts a generic LLM. A purpose-built engine that outperforms GPT-4.1-mini creates a moat through:
+
+- **Training pipeline** — synthetic data generator + reward model + iteration knowledge. Reusable across knowledge types. The asset is the pipeline, not the weights.
+- **Reward design** — composite signal (QA accuracy + tool format + compression + content quality) encoding deep understanding of memory quality.
+- **Compounding** — semantic is the training ground, procedural is where the moat pays off most (generic LLMs struggle hardest, nobody else competing). Building the pipeline now means procedural memory ships with a trained backbone.
+
+### Reward signal (adapted from Mem-α)
+
+| Reward | What it measures | Weight |
+|---|---|---|
+| r1: Correctness | Downstream QA accuracy over built memory (via LongMemEval harness) | 1.0 |
+| r2: Tool format | Valid structured output, correct operation format | 1.0 |
+| r3: Compression | `1 - memory_tokens / input_tokens` | β = 0.05 |
+| r4: Content quality | Semantic validity per operation (LLM judge) | γ = 0.1 |
+
+Plus memv-specific: temporal correctness (absolute dates), supersedes accuracy, self-containedness (no pronouns/relative time).
+
+**Algorithm:** GRPO (no critic needed), TRL + Unsloth. Single A100/H100.
+
+### How it reaches users
+
+```
+memv library (open source)
+├── Storage, retrieval, pipeline — local
+└── Processing — pick one:
+    ├── Any LLM via PydanticAI (multi-step pipeline, bring your own key)
+    ├── memv engine locally (download weights, single-call processing)
+    └── memv engine API (hosted, best quality, no GPU needed)
+```
+
+Hosted API: `POST /v1/process { messages, existing_knowledge } → { operations[] }`. Revenue: Voyage AI / Cohere model — open source library, charge for hosted engine. API also enables RL flywheel (production signals feed retraining).
+
+### Phases
+
+1. **Benchmark baseline** — LongMemEval with GPT-4 (ceiling) and base Gemma E4B (floor). If gap <10%, deprioritize.
+2. **Synthetic environment** — Conversation generator + QA question generator + evaluation pipeline.
+3. **SFT warmup** — Distill frontier model operation traces into E4B.
+4. **RL fine-tuning** — GRPO with composite reward. Ablate components. Compare against SFT-only and frontier.
+5. **Ship** — HuggingFace weights (Apache 2.0), `MemoryEngine` protocol + adapter, hosted API.
+
+### Open questions
+
+1. Is E4B sufficient after SFT alone? Phase 1 answers this.
+2. Reward hacking — model gaming QA with trivially true statements? Mem-α's ablation (β=0, γ=0 degenerate) is informative.
+3. Multilingual reward components.
+4. Model distribution — HuggingFace download on first use vs bundled (~3-5GB quantized).
+5. New `MemoryEngine` protocol needed — doesn't fit `LLMClient` (generate/generate_structured).
+6. Episode provenance detail level — minimal (timestamps + links) or richer (auto-generated summary)?
 
 ---
 
@@ -298,9 +431,10 @@ Not committed to. Revisit based on usage data, benchmark results, and user feedb
 | DX: stats API | — | `count_knowledge/messages/episodes(user_id)` through public API. |
 | DX: idempotent writes | Supermemory | `custom_id` on add methods for upsert semantics. Prevents duplicates on retry/replay. |
 | DX: simplify constructor | — | `MemoryConfig` only, remove 16 duplicate kwargs from `Memory.__init__`. |
-| Benchmark runs (LongMemEval) | — | Harness built, smoke-tested. Full run (500 questions) + ablation deferred. Run when marketing needs numbers. |
+| Benchmark runs (LongMemEval) | —, MemPalace | Baseline: 36.7% task-averaged (5/type, gpt-4o-mini). Extraction quality is the bottleneck, not retrieval. Next: re-run after §10 preference + self-contained fixes. Full 500-question run after extraction quality improves. MemPalace publishes 96.6% R@5 with zero extraction. |
 | Score threshold filtering | PR #19 | If revisited, use cosine similarity pre-filter, not normalized RRF. See PROGRESS.md 2026-03-25. |
-| Knowledge categorization | Multiple competitors | Deferred — unclear value without a concrete consumer. Revisit if smart formatting or filtered retrieval becomes needed. |
+| Episode-level retrieval fallback | MemPalace | Index episode content (narrative or original_messages) in vector/text indices as a lower-weight RRF signal alongside extracted knowledge. Addresses MemPalace's core argument: extraction loses the "why." memv already stores episodes as ground truth but doesn't search them. Cheap to implement, testable against benchmark. |
+| Hierarchical retrieval scoping | MemPalace, multiple competitors | MemPalace measures +34% R@10 from wing/room pre-filtering on 22K+ memories. If benchmark run shows retrieval precision degrades with knowledge count, this is the known fix. Not the same as knowledge categorization — this is search-time scoping, not taxonomy. |
 | Retrieval trigger field (`when_to_use`) | ReMe | Interesting but adds LLM output field + extra embedding per fact. Revisit after benchmarks show retrieval is the bottleneck. |
 | Retrieval reinforcement | OpenMemory | Boost frequently-retrieved facts. Adds complexity to scoring. Need data showing it helps. |
 | Knowledge compaction | MemMachine | Cluster and merge related facts. Solve when knowledge growth is actually a problem. |
@@ -310,7 +444,7 @@ Not committed to. Revisit based on usage data, benchmark results, and user feedb
 | Extraction cost tracking | — | `ProcessingResult` from `process()`. Nice-to-have observability. |
 | Hooks/Events | — | `EventBus` for composability. Useful for framework integration. |
 | Memory scoping | — | Namespaces for different memory spaces. No concrete request yet. |
-| MCP server | — | Separate package if demand materializes. |
+| MCP server | MemPalace | MemPalace ships 19 MCP tools + Claude Code hooks. Real gap for Claude Code early adopters. Separate package. |
 | Search results with graph context | Supermemory | Return `context.parents[]` + `context.children[]` with relationship types in retrieval results. Depends on §7 (extends). Retrieval-time join. |
 | Memory Router (proxy pattern) | Supermemory | Reverse proxy between app and LLM provider, auto-injects memories. Great adoption UX but wrong layer for a library. Revisit as separate package. |
 | `derives` relationship | Supermemory | Inferred knowledge from combining facts, marked `isInference=true`. No validated use case yet. |
@@ -319,7 +453,7 @@ Not committed to. Revisit based on usage data, benchmark results, and user feedb
 ### Not doing
 | Item | Why |
 |------|-----|
-| Full Knowledge Graph | `extends` + cascade invalidation adopted (§7). Full graph (Neo4j, entity-relation triples, graph traversal queries) is still overkill. `derives` relationship deferred — no validated use case yet. |
+| Full Knowledge Graph | `extends` + cascade invalidation adopted (§7). Full graph (Neo4j, entity-relation triples, graph traversal queries) is still overkill. `derives` relationship deferred — no validated use case yet. MemPalace has entity-relation triples (SQLite) with temporal validity — solves a different problem than memv's bi-temporal fields (navigable relationships vs. fact versioning). Whether memv needs relational structure is open, not settled. |
 | Neo4j backend | Niche. Postgres covers production needs. |
 | Background consolidation | Premature without knowledge growth data. |
 | `reflect()`-style generation | Wrong layer — memory retrieves, agent generates. |

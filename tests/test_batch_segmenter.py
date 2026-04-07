@@ -78,7 +78,7 @@ async def test_time_gap_custom_threshold():
 async def test_semantic_grouping():
     llm = MockLLM()
     llm.set_responses("generate", [json.dumps([[0, 1, 3], [2]])])
-    seg = BatchSegmenter(llm)
+    seg = BatchSegmenter(llm, batch_threshold=2)
     msgs = [
         make_message(content="a", sent_at=_ts(0)),
         make_message(content="b", sent_at=_ts(1)),
@@ -95,7 +95,7 @@ async def test_semantic_grouping():
 async def test_markdown_code_block():
     llm = MockLLM()
     llm.set_responses("generate", ["```json\n[[0, 1], [2]]\n```"])
-    seg = BatchSegmenter(llm)
+    seg = BatchSegmenter(llm, batch_threshold=2)
     msgs = [
         make_message(content="x", sent_at=_ts(0)),
         make_message(content="y", sent_at=_ts(1)),
@@ -110,7 +110,7 @@ async def test_markdown_code_block():
 async def test_parse_failure_fallback():
     llm = MockLLM()
     llm.set_responses("generate", ["this is not json at all"])
-    seg = BatchSegmenter(llm)
+    seg = BatchSegmenter(llm, batch_threshold=2)
     msgs = [
         make_message(content="a", sent_at=_ts(0)),
         make_message(content="b", sent_at=_ts(1)),
@@ -126,7 +126,7 @@ async def test_time_gap_then_semantic():
     llm = MockLLM()
     # Only the second batch (3 msgs) triggers LLM
     llm.set_responses("generate", [json.dumps([[0, 2], [1]])])
-    seg = BatchSegmenter(llm, time_gap_minutes=30)
+    seg = BatchSegmenter(llm, batch_threshold=2, time_gap_minutes=30)
     msgs = [
         make_message(content="a", sent_at=_ts(0)),
         make_message(content="b", sent_at=_ts(1)),
@@ -148,7 +148,7 @@ async def test_missing_indices_filled():
     llm = MockLLM()
     # LLM only returns index 0 — indices 1 and 2 should get their own groups
     llm.set_responses("generate", [json.dumps([[0]])])
-    seg = BatchSegmenter(llm)
+    seg = BatchSegmenter(llm, batch_threshold=2)
     msgs = [
         make_message(content="a", sent_at=_ts(0)),
         make_message(content="b", sent_at=_ts(1)),
