@@ -69,7 +69,7 @@ class BatchSegmenter:
         semaphore = asyncio.Semaphore(MAX_CONCURRENT_SEGMENTATIONS)
 
         async def _segment_or_passthrough(batch: list[Message]) -> list[list[Message]]:
-            if len(batch) <= 2:
+            if len(batch) <= self.batch_threshold:
                 return [batch]
             async with semaphore:
                 return await self._segment_batch(batch)
