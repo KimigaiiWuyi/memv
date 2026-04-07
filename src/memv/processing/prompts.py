@@ -42,12 +42,16 @@ KNOWLEDGE_CATEGORIES = """
 Extract knowledge ABOUT THE USER that fits these categories:
 
 - **Identity & Background**: User's name, profession, location, education, demographics
-- **Persistent Preferences**: User's technology choices, communication style, work patterns
+- **Persistent Preferences**: User's technology choices, communication style, work patterns, \
+tool preferences, aesthetic tastes, brand loyalties. Preferences can be IMPLICIT — inferred \
+from what the user chooses, rejects, corrects, or repeatedly engages with
 - **Technical Details**: User's stack, tools, projects, codebases, technical constraints
 - **Relationships**: User's family, colleagues, pets, organizations they belong to
 - **Goals & Plans**: User's short and long-term objectives, deadlines, milestones
 - **Beliefs & Values**: User's opinions, priorities, decision-making criteria
 - **Habits & Patterns**: User's recurring behaviors, routines, typical responses
+- **Corrections & Rejections**: When user says "no, not that" or "I don't like X" — \
+extract what they DON'T want as a negative preference
 
 CRITICAL: Only extract facts that help understand the USER long-term.
 Do NOT extract general knowledge, topic content, or information the assistant provided as educational material.
@@ -83,12 +87,17 @@ Do NOT extract:
 - Treat assistant suggestions about user intent as speculative — never encode them as facts
 - NEVER attribute intent/action/statement to user if it originated in a hypothetical/suggestion/conditional from the assistant
 - Ignore assistant-led topics unless user acts on them
-- Attribute preferences only to explicit user claims — never to questions or reactions
+- Attribute preferences to explicit user claims AND implicit user choices \
+(corrections, rejections, selections) — not to mere questions or suggestions
 - If assistant says "use Python" and user doesn't respond with "yes" or confirm - DO NOT extract "User uses Python"
 - If assistant provides code in language X but user says "I use Y" - extract Y, not X
 - The user ASKING about something is NOT the same as the user USING it
 - Look for USER messages containing "I use", "I prefer", "I like", "I work with", "my project uses"
 - Extract opinions WITH reasons when stated: "User finds X too basic" or "User likes Y because it's intuitive"
+- Extract IMPLICIT preferences from user behavior: if user asks only about Sony gear, \
+extract "User uses Sony cameras". If user corrects from X to Z, extract "User prefers Z"
+- When a conversation centers on one tool/brand/topic by USER choice, \
+extract that preference even without an explicit "I prefer" statement
 """
 
 # =============================================================================
@@ -111,6 +120,8 @@ Every extracted statement MUST be independently interpretable without conversati
 - Absolute dates when temporal info exists: "on [resolved date]", not "yesterday"
 - Specific names: "User's React project at Vstorm", not "the project"
 - Third person: "User prefers Python", not "I prefer Python"
+- WHO/WHAT/WHERE/WHEN when mentioned in conversation: "User redeemed coupon at Target", \
+not just "User redeemed coupon" — include locations, tools, brands from surrounding messages
 
 **Coreference resolution — resolve BEFORE writing the statement:**
 - "my kids" → "User's children"
@@ -255,7 +266,8 @@ Statements with unresolved relative time ("yesterday", "last week") are INVALID 
 - DO extract factual information communicated by the assistant (dates, appointments, confirmations)
 - Do NOT extract assistant suggestions, recommendations, or hypotheticals as user facts
 - Treat assistant suggestions about user intent as speculative — never encode them as facts
-- Attribute preferences only to explicit user claims — never to assistant questions or reactions
+- Attribute preferences to explicit user claims AND implicit user choices \
+(corrections, rejections, selections) — not to assistant questions or suggestions
 - Preserve the user's exact phrasing and technical terms
 
 <episode_context>
@@ -289,6 +301,10 @@ Topic: {episode_title}
 - "User uses JavaScript" (correct third-person form)
 - "User started using FastAPI on 2024-06-14" (absolute date, not "yesterday")
 - "User moved to Berlin in 2023" (resolved, not "last year")
+- "User prefers Adobe Premiere Pro for video editing" (preference inferred from entire conversation about Premiere Pro features)
+- "User prefers Sony-compatible camera accessories" (inferred from user consistently asking about Sony gear)
+- "User does not want hotel suggestions without ocean views" (negative preference from rejection)
+- "User redeemed a $5 coupon on coffee creamer at Target on 2023-05-28" (self-contained: includes WHERE, WHAT, WHEN)
 
 ### BAD Extractions:
 - "Radiation therapy uses ionizing radiation to kill cancer cells" (general knowledge, not about the user)
@@ -392,6 +408,9 @@ Focus on SPECIFIC DETAILS even if the general topic was predicted:
 - "User had issues with Milvus due to hosting overhead"
 - "User started using FastAPI on 2024-06-14" (absolute date, not "yesterday")
 - "User moved to Berlin in 2023" (resolved, not "last year")
+- "User prefers Adobe Premiere Pro for video editing" (preference inferred from entire conversation about Premiere Pro features)
+- "User does not want hotel suggestions without ocean views" (negative preference from rejection)
+- "User redeemed a $5 coupon on coffee creamer at Target on 2023-05-28" (self-contained: includes WHERE, WHAT, WHEN)
 
 ### BAD Extractions:
 - "Radiation therapy uses ionizing radiation" (general knowledge, not about user)
