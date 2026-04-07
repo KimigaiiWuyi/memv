@@ -88,12 +88,10 @@ async def test_multiple_exchanges(tmp_path):
     llm = MockLLM()
     embedder = MockEmbedder()
 
-    # 4 msgs with same timestamp → 1 time batch, >2 msgs → LLM segmentation
-    # Segmenter groups all 4 together
+    # 4 msgs with same timestamp → 1 time batch, ≤20 msgs → passthrough (no LLM segmentation)
     llm.set_responses(
         "generate",
         [
-            json.dumps([[0, 1, 2, 3]]),  # segmentation: all in one group
             _episode_json("Multi Exchange", "Multiple exchanges"),  # episode gen
         ],
     )
@@ -106,8 +104,8 @@ async def test_multiple_exchanges(tmp_path):
         count = await memory.process("user1")
 
         assert count == 1
-        # Verify: 1 segmentation + 1 episode gen = 2 generate calls
-        assert len(llm.calls["generate"]) == 2
+        # Verify: 0 segmentation + 1 episode gen = 1 generate call
+        assert len(llm.calls["generate"]) == 1
 
 
 async def test_user_isolation_e2e(tmp_path):
@@ -208,11 +206,10 @@ async def test_auto_process_at_threshold(tmp_path):
     llm = MockLLM()
     embedder = MockEmbedder()
 
-    # 4 msgs with same timestamp → 1 time batch, >2 → LLM segmentation
+    # 4 msgs with same timestamp → 1 time batch, ≤20 → passthrough (no LLM segmentation)
     llm.set_responses(
         "generate",
         [
-            json.dumps([[0, 1, 2, 3]]),  # segmentation
             _episode_json("Auto", "Auto processed"),  # episode gen
         ],
     )

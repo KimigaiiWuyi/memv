@@ -6,6 +6,8 @@ Papery, artykuły, repozytoria do przeczytania i notatki z przeczytanych.
 
 ## Do przeczytania
 
+- [ ] How Kimi, Cursor, and Chroma Train Agentic Models with RL - [Kimi Composer Context](https://www.philschmid.de/kimi-composer-context)
+- [ ] MEM-α: LEARNING MEMORY CONSTRUCTION VIA REINFORCEMENT LEARNING — [OpenReview](https://openreview.net/pdf/84b195754f5a425454f70a545ce1e22ee38834db.pdf)
 - [ ] Grounding Agent Memory in Contextual Intent — [arXiv:2601.10702](https://arxiv.org/abs/2601.10702)
 - [ ] Beyond Static Summarization: Proactive Memory Extraction for LLM Agents — [arXiv:2601.04463](https://arxiv.org/abs/2601.04463)
 - [ ] HiMem: Hierarchical Long-Term Memory for LLM Long-Horizon Agents — [arXiv:2601.06377](https://arxiv.org/abs/2601.06377)

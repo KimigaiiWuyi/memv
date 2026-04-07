@@ -39,15 +39,22 @@ Apply these quality tests to each candidate fact:
 # =============================================================================
 
 KNOWLEDGE_CATEGORIES = """
-Extract knowledge that fits these categories:
+Extract knowledge ABOUT THE USER that fits these categories:
 
-- **Identity & Background**: Name, profession, location, education, demographics
-- **Persistent Preferences**: Technology choices, communication style, work patterns
-- **Technical Details**: Stack, tools, projects, codebases, technical constraints
-- **Relationships**: Family, colleagues, pets, organizations they belong to
-- **Goals & Plans**: Short and long-term objectives, deadlines, milestones
-- **Beliefs & Values**: Opinions, priorities, decision-making criteria
-- **Habits & Patterns**: Recurring behaviors, routines, typical responses
+- **Identity & Background**: User's name, profession, location, education, demographics
+- **Persistent Preferences**: User's technology choices, communication style, work patterns, \
+tool preferences, aesthetic tastes, brand loyalties. Preferences can be IMPLICIT — inferred \
+from what the user chooses, rejects, corrects, or repeatedly engages with
+- **Technical Details**: User's stack, tools, projects, codebases, technical constraints
+- **Relationships**: User's family, colleagues, pets, organizations they belong to
+- **Goals & Plans**: User's short and long-term objectives, deadlines, milestones
+- **Beliefs & Values**: User's opinions, priorities, decision-making criteria
+- **Habits & Patterns**: User's recurring behaviors, routines, typical responses
+- **Corrections & Rejections**: When user says "no, not that" or "I don't like X" — \
+extract what they DON'T want as a negative preference
+
+CRITICAL: Only extract facts that help understand the USER long-term.
+Do NOT extract general knowledge, topic content, or information the assistant provided as educational material.
 """
 
 # =============================================================================
@@ -58,12 +65,17 @@ Extract knowledge that fits these categories:
 EXCLUSIONS = """
 Do NOT extract:
 
+- **General/topical knowledge**: Facts about the world, science, history, technology, etc.
+  (e.g., "Radiation therapy uses ionizing radiation", "Bitcoin uses blockchain", "Python is a programming language")
+- **Educational content from assistant**: Information the assistant explained or taught
+  (e.g., "HTTP uses TCP", "Kubernetes orchestrates containers")
+- **Conversation topic summaries**: What the conversation was about, not facts about the user
+  (e.g., "The conversation covered cooking techniques", "They discussed radiation therapy")
 - Temporary emotions or reactions ("user seems frustrated")
 - Single conversation acknowledgments ("user said thanks")
 - Vague statements without specifics ("user likes food")
 - Context-dependent information ("user prefers this one")
 - Generic pleasantries or filler
-- Obvious or common knowledge
 - Speculative or uncertain claims
 - Conversation events ("User asked about X", "User requested Y") - extract the FACT, not the action
 
@@ -75,12 +87,17 @@ Do NOT extract:
 - Treat assistant suggestions about user intent as speculative — never encode them as facts
 - NEVER attribute intent/action/statement to user if it originated in a hypothetical/suggestion/conditional from the assistant
 - Ignore assistant-led topics unless user acts on them
-- Attribute preferences only to explicit user claims — never to questions or reactions
+- Attribute preferences to explicit user claims AND implicit user choices \
+(corrections, rejections, selections) — not to mere questions or suggestions
 - If assistant says "use Python" and user doesn't respond with "yes" or confirm - DO NOT extract "User uses Python"
 - If assistant provides code in language X but user says "I use Y" - extract Y, not X
 - The user ASKING about something is NOT the same as the user USING it
 - Look for USER messages containing "I use", "I prefer", "I like", "I work with", "my project uses"
 - Extract opinions WITH reasons when stated: "User finds X too basic" or "User likes Y because it's intuitive"
+- Extract IMPLICIT preferences from user behavior: if user asks only about Sony gear, \
+extract "User uses Sony cameras". If user corrects from X to Z, extract "User prefers Z"
+- When a conversation centers on one tool/brand/topic by USER choice, \
+extract that preference even without an explicit "I prefer" statement
 """
 
 # =============================================================================
@@ -103,6 +120,8 @@ Every extracted statement MUST be independently interpretable without conversati
 - Absolute dates when temporal info exists: "on [resolved date]", not "yesterday"
 - Specific names: "User's React project at Vstorm", not "the project"
 - Third person: "User prefers Python", not "I prefer Python"
+- WHO/WHAT/WHERE/WHEN when mentioned in conversation: "User redeemed coupon at Target", \
+not just "User redeemed coupon" — include locations, tools, brands from surrounding messages
 
 **Coreference resolution — resolve BEFORE writing the statement:**
 - "my kids" → "User's children"
@@ -247,7 +266,8 @@ Statements with unresolved relative time ("yesterday", "last week") are INVALID 
 - DO extract factual information communicated by the assistant (dates, appointments, confirmations)
 - Do NOT extract assistant suggestions, recommendations, or hypotheticals as user facts
 - Treat assistant suggestions about user intent as speculative — never encode them as facts
-- Attribute preferences only to explicit user claims — never to assistant questions or reactions
+- Attribute preferences to explicit user claims AND implicit user choices \
+(corrections, rejections, selections) — not to assistant questions or suggestions
 - Preserve the user's exact phrasing and technical terms
 
 <episode_context>
@@ -281,8 +301,16 @@ Topic: {episode_title}
 - "User uses JavaScript" (correct third-person form)
 - "User started using FastAPI on 2024-06-14" (absolute date, not "yesterday")
 - "User moved to Berlin in 2023" (resolved, not "last year")
+- "User prefers Adobe Premiere Pro for video editing" (preference inferred from entire conversation about Premiere Pro features)
+- "User prefers Sony-compatible camera accessories" (inferred from user consistently asking about Sony gear)
+- "User does not want hotel suggestions without ocean views" (negative preference from rejection)
+- "User redeemed a $5 coupon on coffee creamer at Target on 2023-05-28" (self-contained: includes WHERE, WHAT, WHEN)
 
 ### BAD Extractions:
+- "Radiation therapy uses ionizing radiation to kill cancer cells" (general knowledge, not about the user)
+- "Bitcoin is a decentralized cryptocurrency" (topic content, not about the user)
+- "A kitchen knife should be sharpened at a 15-20 degree angle" (educational content from assistant)
+- "The fox-chicken-grain riddle is a classic river crossing puzzle" (general knowledge)
 - "I use JavaScript" (raw copy - should be "User uses JavaScript")
 - "He started using it yesterday" (unresolved pronoun + relative time → "User started using FastAPI on 2024-06-14")
 - "They moved there last year" (unresolved pronoun + relative time → "User moved to Berlin in 2023")
@@ -308,7 +336,9 @@ For each extracted item, specify:
 - invalid_at: ISO 8601 datetime when fact stops being true, or null if still true (e.g., "2024-12-31T23:59:59Z")
 - confidence: 0.0-1.0
 
-Extract ALL concrete facts. Multiple extractions from one episode is expected."""
+Quality over quantity — fewer valuable statements about the USER are better than many generic ones.
+Only extract facts that help understand the user long-term. If a conversation is about a general topic
+(cooking, physics, history) but reveals nothing personal about the user, return an EMPTY list."""
 
 
 def extraction_prompt_with_prediction(
@@ -378,8 +408,13 @@ Focus on SPECIFIC DETAILS even if the general topic was predicted:
 - "User had issues with Milvus due to hosting overhead"
 - "User started using FastAPI on 2024-06-14" (absolute date, not "yesterday")
 - "User moved to Berlin in 2023" (resolved, not "last year")
+- "User prefers Adobe Premiere Pro for video editing" (preference inferred from entire conversation about Premiere Pro features)
+- "User does not want hotel suggestions without ocean views" (negative preference from rejection)
+- "User redeemed a $5 coupon on coffee creamer at Target on 2023-05-28" (self-contained: includes WHERE, WHAT, WHEN)
 
 ### BAD Extractions:
+- "Radiation therapy uses ionizing radiation" (general knowledge, not about user)
+- "Bitcoin uses proof-of-work consensus" (topic content, not about user)
 - "He started using it yesterday" (unresolved pronoun + relative time)
 - "They moved there last year" (unresolved pronoun + relative time)
 - "User is interested in X" (too vague)
@@ -401,7 +436,9 @@ For each extracted item, specify:
 - confidence: 0.0-1.0
 - supersedes: If this fact replaces an entry from <existing_knowledge>, set to its index number. Otherwise null.
 
-Return EMPTY LIST if no concrete facts found beyond the prediction."""
+Quality over quantity — fewer valuable statements about the USER are better than many generic ones.
+Return EMPTY LIST if no facts about the user are found beyond the prediction.
+General knowledge or topic content discussed in conversation is NOT extractable."""
 
 
 # =============================================================================
