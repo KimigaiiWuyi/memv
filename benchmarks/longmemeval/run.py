@@ -9,7 +9,7 @@ import time
 from . import add, evaluate, search
 
 
-def _make_clients(model: str = "openai:gpt-4.1-mini"):
+def _make_clients(model: str = "openai:gpt-4o-mini"):
     from memv.embeddings.openai import OpenAIEmbedAdapter
     from memv.llm.pydantic_ai import PydanticAIAdapter
 
@@ -24,7 +24,7 @@ async def run(
     max_concurrent: int = 5,
     timeout: int = 1200,
     top_k: int = 10,
-    model: str = "openai:gpt-4.1-mini",
+    model: str = "openai:gpt-4o-mini",
     stages: list[str] | None = None,
     resume: bool = True,
 ):
@@ -73,7 +73,6 @@ async def run(
         print(f"{'=' * 60}\n")
         await evaluate.run(
             run_name=run_name,
-            llm_client=llm_client,
             resume=resume,
         )
 
@@ -94,7 +93,7 @@ def main():
     parser.add_argument("--top-k", type=int, default=10, help="Number of memories to retrieve")
     parser.add_argument(
         "--model",
-        default="openai:gpt-4.1-mini",
+        default="openai:gpt-4o-mini",
         help="PydanticAI model string (e.g. google-gla:gemini-2.5-flash, groq:llama-3.3-70b-versatile)",
     )
     parser.add_argument("--stages", default="add,search,evaluate", help="Comma-separated stages to run")

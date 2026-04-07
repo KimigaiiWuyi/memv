@@ -1,4 +1,13 @@
-"""Stage 3: LLM-judge evaluation of LongMemEval search results."""
+"""Stage 3: LLM-judge evaluation of LongMemEval search results.
+
+Follows the official LongMemEval evaluation protocol (xiaowu0162/longmemeval).
+Uses OpenAI directly (not memv's LLMClient) to match the official setup:
+  - gpt-4o as judge (official asserts gpt-4o-2024-08-06)
+  - temperature=0, max_tokens=10
+  - No system prompt (user message only)
+  - Type-specific prompts + abstention prompt for _abs questions
+  - Task-averaged accuracy as primary metric
+"""
 
 from __future__ import annotations
 
@@ -8,59 +17,52 @@ import json
 import logging
 from datetime import datetime, timezone
 
+from openai import AsyncOpenAI
+
 from ._checkpoint import RESULTS_DIR, append_jsonl, load_all_results, load_completed
 
 logger = logging.getLogger(__name__)
 
-# --- Type-specific judge prompts (adapted from Nemori/Zep LongMemEval evals) ---
+JUDGE_MODEL = "gpt-4o"
+
+# --- Judge prompts matching official LongMemEval evaluate_qa.py (xiaowu0162/longmemeval) ---
 
 TEMPORAL_REASONING_PROMPT = """I will give you a question, a correct answer, and a response from a model. \
 Please answer yes if the response contains the correct answer. Otherwise, answer no. \
-If the response is equivalent to the correct answer or contains all the intermediate steps to get the correct answer, \
-you should also answer yes. If the response only contains a subset of the information required by the answer, answer no. \
+If the response is equivalent to the correct answer or contains all the intermediate steps \
+to get the correct answer, you should also answer yes. \
+If the response only contains a subset of the information required by the answer, answer no. \
 In addition, do not penalize off-by-one errors for the number of days. \
 If the question asks for the number of days/weeks/months, etc., and the model makes off-by-one errors \
 (e.g., predicting 19 days when the answer is 18), the model's response is still correct.
 
-<QUESTION>
-{question}
-</QUESTION>
-<CORRECT ANSWER>
-{gold_answer}
-</CORRECT ANSWER>
-<RESPONSE>
-{response}
-</RESPONSE>"""
+Question: {question}
+
+Correct Answer: {gold_answer}
+
+Model Response: {response}"""
 
 KNOWLEDGE_UPDATE_PROMPT = """I will give you a question, a correct answer, and a response from a model. \
 Please answer yes if the response contains the correct answer. Otherwise, answer no. \
 If the response contains some previous information along with an updated answer, \
 the response should be considered as correct as long as the updated answer is the required answer.
 
-<QUESTION>
-{question}
-</QUESTION>
-<CORRECT ANSWER>
-{gold_answer}
-</CORRECT ANSWER>
-<RESPONSE>
-{response}
-</RESPONSE>"""
+Question: {question}
+
+Correct Answer: {gold_answer}
+
+Model Response: {response}"""
 
 SINGLE_SESSION_PREFERENCE_PROMPT = """I will give you a question, a rubric for desired personalized response, \
 and a response from a model. Please answer yes if the response satisfies the desired response. Otherwise, answer no. \
 The model does not need to reflect all the points in the rubric. \
 The response is correct as long as it recalls and utilizes the user's personal information correctly.
 
-<QUESTION>
-{question}
-</QUESTION>
-<RUBRIC>
-{gold_answer}
-</RUBRIC>
-<RESPONSE>
-{response}
-</RESPONSE>"""
+Question: {question}
+
+Rubric: {gold_answer}
+
+Model Response: {response}"""
 
 DEFAULT_PROMPT = """I will give you a question, a correct answer, and a response from a model. \
 Please answer yes if the response contains the correct answer. Otherwise, answer no. \
@@ -68,17 +70,22 @@ If the response is equivalent to the correct answer or contains all the intermed
 to get the correct answer, you should also answer yes. \
 If the response only contains a subset of the information required by the answer, answer no.
 
-<QUESTION>
-{question}
-</QUESTION>
-<CORRECT ANSWER>
-{gold_answer}
-</CORRECT ANSWER>
-<RESPONSE>
-{response}
-</RESPONSE>"""
+Question: {question}
 
-SYSTEM_PROMPT = "You are an expert grader. Respond with ONLY 'yes' or 'no'."
+Correct Answer: {gold_answer}
+
+Model Response: {response}"""
+
+ABSTENTION_PROMPT = """I will give you an unanswerable question, an explanation, and a response from a model. \
+Please answer yes if the model correctly identifies the question as unanswerable. \
+The model could say that the information is incomplete, or some other information is given \
+but the asked information is not.
+
+Question: {question}
+
+Explanation: {gold_answer}
+
+Model Response: {response}"""
 
 PROMPTS_BY_TYPE = {
     "temporal-reasoning": TEMPORAL_REASONING_PROMPT,
@@ -88,24 +95,37 @@ PROMPTS_BY_TYPE = {
 
 
 async def evaluate_single(
-    llm_client,
+    client: AsyncOpenAI,
     question: str,
     gold_answer: str,
     response: str,
     question_type: str,
+    question_id: str = "",
 ) -> bool:
-    """Evaluate a single question-response pair using LLM judge."""
-    template = PROMPTS_BY_TYPE.get(question_type, DEFAULT_PROMPT)
-    prompt = template.format(question=question, gold_answer=gold_answer, response=response)
-    full_prompt = f"{SYSTEM_PROMPT}\n\n{prompt}"
+    """Evaluate a single question-response pair using LLM judge.
 
-    result = await llm_client.generate(full_prompt)
+    Uses OpenAI directly (not memv's LLMClient) to match the official
+    LongMemEval evaluation protocol: gpt-4o, temperature=0, no system prompt.
+    """
+    if question_id.endswith("_abs"):
+        template = ABSTENTION_PROMPT
+    else:
+        template = PROMPTS_BY_TYPE.get(question_type, DEFAULT_PROMPT)
+    prompt = template.format(question=question, gold_answer=gold_answer, response=response)
+    prompt += "\n\nIs the model response correct? Answer yes or no only."
+
+    completion = await client.chat.completions.create(
+        model=JUDGE_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0,
+        max_tokens=10,
+    )
+    result = completion.choices[0].message.content or ""
     return result.strip().lower().startswith("yes")
 
 
 async def run(
     run_name: str = "baseline",
-    llm_client=None,
     max_concurrent: int = 10,
     resume: bool = True,
 ):
@@ -113,12 +133,10 @@ async def run(
 
     Args:
         run_name: Name for this benchmark run (must match search stage).
-        llm_client: LLMClient instance for LLM-judge.
         max_concurrent: Max concurrent LLM calls.
         resume: Resume from checkpoint if prior results exist.
     """
-    if llm_client is None:
-        raise RuntimeError("llm_client is required.")
+    client = AsyncOpenAI()
 
     run_dir = RESULTS_DIR / run_name
     search_path = run_dir / "search.json"
@@ -157,11 +175,12 @@ async def run(
             else:
                 try:
                     is_correct = await evaluate_single(
-                        llm_client,
+                        client,
                         item["question"],
                         item["answer"],
                         item["response"],
                         item.get("question_type", "default"),
+                        question_id=item["question_id"],
                     )
                     scored = {
                         "question_id": item["question_id"],
@@ -190,6 +209,8 @@ async def run(
     all_scored = load_all_results(jsonl_path)
 
     type_stats: dict[str, dict[str, int]] = {}
+    abstention_correct = 0
+    abstention_total = 0
     total_correct = 0
     total_scored = 0
     total_errors = 0
@@ -206,11 +227,18 @@ async def run(
         type_stats[qtype]["total"] += 1
         total_scored += 1
 
+        is_abstention = scored.get("question_id", "").endswith("_abs")
+        if is_abstention:
+            abstention_total += 1
+
         if scored["is_correct"]:
             type_stats[qtype]["correct"] += 1
             total_correct += 1
+            if is_abstention:
+                abstention_correct += 1
 
     overall_accuracy = total_correct / total_scored if total_scored > 0 else 0
+    abstention_accuracy = abstention_correct / abstention_total if abstention_total > 0 else 0
     accuracy_by_type = {}
     for qtype, stats in sorted(type_stats.items()):
         acc = stats["correct"] / stats["total"] if stats["total"] > 0 else 0
@@ -220,20 +248,31 @@ async def run(
             "accuracy": round(acc, 4),
         }
 
+    # Task-averaged accuracy: mean of per-type means (official LongMemEval metric).
+    # Prevents type imbalance from skewing results.
+    type_accuracies = [s["accuracy"] for s in accuracy_by_type.values()]
+    task_averaged_accuracy = sum(type_accuracies) / len(type_accuracies) if type_accuracies else 0
+
     scores = {
         "run_name": run_name,
         "total_questions": len(all_scored),
         "scored_questions": total_scored,
         "errors": total_errors,
         "correct_answers": total_correct,
+        "task_averaged_accuracy": round(task_averaged_accuracy, 4),
         "overall_accuracy": round(overall_accuracy, 4),
+        "abstention_accuracy": round(abstention_accuracy, 4),
+        "abstention_total": abstention_total,
         "accuracy_by_type": accuracy_by_type,
         "evaluation_timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
         "scored_items": all_scored,
     }
 
     print(f"\n{'=' * 50}")
+    print(f"Task-averaged: {task_averaged_accuracy:.1%}")
     print(f"Overall: {total_correct}/{total_scored} = {overall_accuracy:.1%}")
+    if abstention_total:
+        print(f"Abstention: {abstention_correct}/{abstention_total} = {abstention_accuracy:.1%}")
     if total_errors:
         print(f"Errors (excluded from scoring): {total_errors}")
     print(f"{'=' * 50}")
@@ -248,12 +287,6 @@ async def run(
     return scores
 
 
-def _make_llm_client():
-    from memv.llm.pydantic_ai import PydanticAIAdapter
-
-    return PydanticAIAdapter()
-
-
 def main():
     parser = argparse.ArgumentParser(description="LongMemEval Stage 3: Evaluation")
     parser.add_argument("--run-name", default="baseline", help="Name for this run")
@@ -261,8 +294,7 @@ def main():
     parser.add_argument("--no-resume", action="store_true", help="Start fresh, ignore prior checkpoint")
     args = parser.parse_args()
 
-    llm_client = _make_llm_client()
-    asyncio.run(run(run_name=args.run_name, llm_client=llm_client, max_concurrent=args.max_concurrent, resume=not args.no_resume))
+    asyncio.run(run(run_name=args.run_name, max_concurrent=args.max_concurrent, resume=not args.no_resume))
 
 
 if __name__ == "__main__":

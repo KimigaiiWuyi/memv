@@ -46,7 +46,7 @@ async def process_question(
     config = get_config(config_name)
 
     memory = Memory(
-        db_path=db_path,
+        db_url=db_path,
         config=config,
         embedding_client=embedding_client,
         llm_client=llm_client,

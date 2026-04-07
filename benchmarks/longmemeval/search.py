@@ -24,7 +24,8 @@ ANSWER_PROMPT = """You are a memory assistant that retrieves accurate informatio
 2. Pay special attention to timestamps to determine the correct answer
 3. If memories contain contradictory information, prioritize the most recent memory
 4. Convert relative time references to specific dates using the question date as reference
-5. The answer should be concise (less than 5-6 words)
+5. If the memories do not contain enough information to answer the question, say so
+6. The answer should be concise (less than 5-6 words)
 
 ## Memories
 {memories}
@@ -66,7 +67,7 @@ async def process_question(
     config = get_config(config_name)
 
     memory = Memory(
-        db_path=db_path,
+        db_url=db_path,
         config=config,
         embedding_client=embedding_client,
         llm_client=llm_client,
